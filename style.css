@@ -1,0 +1,1215 @@
+@font-face {
+    font-family: 'cbPixel';
+    src: url('assets/fonts/pixel.ttf') format('truetype');
+    font-display: swap;
+}
+
+/* ============================================================
+   ПАЛИТРА-ХАМЕЛЕОН
+   Все цвета берутся из активной темы SillyTavern.
+   Если переменной темы нет — используется запасной оранжевый.
+   Меняй только эти строки, чтобы перекрасить всё расширение.
+   ============================================================ */
+#chibiBoss-layer {
+    /* акцент темы (по умолчанию — твой оранжевый) */
+    --cb-accent:  var(--SmartThemeQuoteColor, #ff9c5b);
+    /* контрастный «цвет игрока» (крестик, выбор, цель хода) */
+    --cb-accent2: #6bd1ff;
+    /* основной текст */
+    --cb-text:    var(--SmartThemeBodyColor, #ffe9d6);
+    /* фон панелей (тинт темы; запасной — тёмно-сливовый) */
+    --cb-panel:   var(--SmartThemeBlurTintColor, #2b1a25);
+
+    /* производные оттенки (выводятся из акцента/текста — не трогай) */
+    --cb-fill-soft:   color-mix(in srgb, var(--cb-accent) 12%, transparent);
+    --cb-fill:        color-mix(in srgb, var(--cb-accent) 22%, transparent);
+    --cb-line:        color-mix(in srgb, var(--cb-accent) 35%, transparent);
+    --cb-line-strong: color-mix(in srgb, var(--cb-accent) 55%, transparent);
+    --cb-text-dim:    color-mix(in srgb, var(--cb-text) 72%, transparent);
+    --cb-text-dimmer: color-mix(in srgb, var(--cb-text) 50%, transparent);
+    --cb-panel-deep:  color-mix(in srgb, var(--cb-panel) 72%, #000);
+    --cb-header:      color-mix(in srgb, var(--cb-accent) 32%, var(--cb-panel));
+    --cb-header-2:    color-mix(in srgb, var(--cb-accent) 24%, var(--cb-panel));
+}
+
+#chibiBoss-layer {
+    position: fixed;
+    inset: 0;
+    pointer-events: none; /* слой не перехватывает клики, только сам босс */
+    z-index: 9999;
+}
+
+#chibiBoss-actor {
+    position: absolute;
+    width: 124px;
+    height: 124px;
+    transform-origin: 0 0;       /* критично для компенсации зума */
+    pointer-events: auto;
+    cursor: grab;
+    user-select: none;
+    -webkit-user-drag: none;
+    will-change: transform, left, top;
+    z-index: 9999;               /* босс ПОВЕРХ стола (у стола 9998) */
+}
+
+#chibiBoss-actor.dragging {
+    cursor: grabbing;
+}
+
+#chibiBoss-actor img {
+    width: 124px;
+    height: 124px;
+    image-rendering: pixelated;  /* чёткий пиксель-арт */
+    image-rendering: crisp-edges;
+    display: block;
+    pointer-events: none;
+    -webkit-user-drag: none;
+}
+
+/* ----- блок настроек в панели Extensions ----- */
+#chibiBoss-settings .chibiBoss-row {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    margin: 8px 0;
+}
+
+#chibiBoss-settings label {
+    min-width: 120px;
+}
+
+#chibiBoss-settings .chibiBoss-hint {
+    font-size: 0.8em;
+    opacity: 0.6;
+    margin: 2px 0 10px 0;
+}
+
+#chibiBoss-settings input[type="text"],
+#chibiBoss-settings select {
+    flex: 1;
+}
+
+/* ===== Круговое меню ===== */
+#chibiBoss-menu {
+    position: absolute;
+    width: 260px;
+    height: 260px;
+    pointer-events: none;
+    z-index: 10000;
+    font-family: monospace;
+}
+
+.cb-menu-ring {
+    position: absolute;
+    inset: 0;
+}
+
+.cb-menu-item {
+    position: absolute;
+    width: 56px;
+    height: 56px;
+    padding: 0;
+    border: none;
+    background: transparent;
+    border-radius: 50%;
+    cursor: pointer;
+    pointer-events: auto;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    opacity: 0;
+    transform: scale(0.3);
+    transition: transform .2s cubic-bezier(0.34, 1.56, 0.64, 1),
+                opacity .2s ease;
+}
+
+#chibiBoss-menu.open .cb-menu-item {
+    opacity: 1;
+    transform: scale(1);
+    transition-delay: var(--cb-delay, 0s);
+}
+
+.cb-menu-item:hover {
+    transform: scale(1.12);
+}
+
+.cb-menu-item img {
+    width: 56px;
+    height: 56px;
+    image-rendering: pixelated;
+    image-rendering: crisp-edges;
+    pointer-events: none;
+}
+
+/* шапка: имя + индикаторы */
+.cb-menu-header {
+    position: absolute;
+    bottom: calc(100% + 8px);
+    left: 50%;
+    transform: translateX(-50%) translateY(10px);
+    min-width: 200px;
+    padding: 10px 14px;
+    background: transparent;
+    pointer-events: auto;
+    opacity: 0;
+    transition: opacity .25s ease, transform .25s ease;
+}
+
+#chibiBoss-menu.open .cb-menu-header {
+    opacity: 1;
+    transform: translateX(-50%) translateY(0);
+    transition-delay: 0.05s;
+}
+
+.cb-menu-name {
+    text-align: center;
+    font-weight: bold;
+    font-size: 14px;
+    font-family: 'cbPixel', monospace;   /* ← добавлена эта строка */
+    color: var(--cb-text);
+    margin-bottom: 8px;
+    letter-spacing: 1px;
+    text-transform: uppercase;
+}
+
+
+.cb-indicator {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    margin: 5px 0;
+}
+
+.cb-ind-label {
+    font-size: 18px;
+    width: 20px;
+    text-align: center;
+    filter: drop-shadow(0 1px 2px rgba(0, 0, 0, 0.8));
+}
+
+.cb-ind-sprite {
+    width: 156px;           /* 78 × 2 */
+    height: 18px;           /* 9 × 2 */
+    image-rendering: pixelated;
+    image-rendering: crisp-edges;
+}
+
+/* ===== Рабочий стол ===== */
+#chibiBoss-desk {
+    position: absolute;
+    width: 162px;
+    height: 162px;
+    transform-origin: 0 0;
+    pointer-events: auto;
+    cursor: grab;
+    user-select: none;
+    -webkit-user-drag: none;
+    z-index: 9998;              /* чуть ниже босса (9999) */
+    will-change: transform, left, top;
+}
+
+#chibiBoss-desk.dragging {
+    cursor: grabbing;
+}
+
+#chibiBoss-desk .cb-desk-img {
+    width: 162px;
+    height: 162px;
+    image-rendering: pixelated;
+    image-rendering: crisp-edges;
+    display: block;
+    pointer-events: none;
+    -webkit-user-drag: none;
+}
+
+/* календарь на столе */
+#chibiBoss-desk .cb-calendar {
+    position: absolute;
+    left: 0px;                 /* отступ слева — меняй тут */
+    top: 30px;                  /* чуть ниже середины — меняй тут */
+    width: 60px;
+    height: 60px;
+    image-rendering: pixelated;
+    image-rendering: crisp-edges;
+    cursor: pointer;
+    pointer-events: auto;
+}
+
+/* ===== Борд статистики ===== */
+#chibiBoss-stats {
+    position: absolute;
+    width: 220px;
+    z-index: 10001;
+    pointer-events: auto;
+    display: none;
+    background: linear-gradient(160deg, var(--cb-panel) 0%, var(--cb-panel-deep) 100%);
+    backdrop-filter: blur(10px);
+    -webkit-backdrop-filter: blur(10px);
+    border: 3px solid var(--cb-accent);
+    border-radius: 14px;
+    box-shadow: 0 8px 24px rgba(0, 0, 0, 0.55),
+                inset 0 0 0 2px var(--cb-fill-soft);
+    font-family: 'cbPixel', monospace;
+    color: var(--cb-text);
+    overflow: hidden;
+    padding-bottom: 14px;
+}
+
+#chibiBoss-stats .cb-stats-head {
+    position: relative;
+    height: 26px;
+    background: linear-gradient(180deg, var(--cb-header) 0%, var(--cb-header-2) 100%);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+}
+
+#chibiBoss-stats .cb-stats-head-title {
+    font-size: 9px;
+    letter-spacing: 2px;
+    text-transform: uppercase;
+    color: var(--cb-text);
+}
+
+#chibiBoss-stats .cb-stats-close {
+    position: absolute;
+    top: 50%;
+    right: 8px;
+    transform: translateY(-50%);
+    font-family: 'cbPixel', monospace;
+    font-size: 11px;
+    color: var(--cb-text);
+    cursor: pointer;
+    line-height: 1;
+    opacity: 0.8;
+}
+
+#chibiBoss-stats .cb-stats-close:hover {
+    opacity: 1;
+}
+
+#chibiBoss-stats .cb-stats-clock {
+    text-align: center;
+    font-size: 30px;
+    letter-spacing: 2px;
+    margin: 14px 0 2px 0;
+    color: var(--cb-accent);
+}
+
+#chibiBoss-stats .cb-stats-day {
+    text-align: center;
+    font-size: 11px;
+    letter-spacing: 1px;
+    color: var(--cb-text);
+}
+
+#chibiBoss-stats .cb-stats-date {
+    text-align: center;
+    font-size: 9px;
+    opacity: 0.7;
+    margin-top: 3px;
+}
+
+#chibiBoss-stats .cb-stats-divider {
+    height: 2px;
+    margin: 12px 16px;
+    background: repeating-linear-gradient(
+        90deg,
+        var(--cb-line-strong) 0 6px,
+        transparent 6px 10px
+    );
+}
+
+#chibiBoss-stats .cb-stats-chip {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    margin: 6px 16px;
+    padding: 6px 10px;
+    background: var(--cb-fill-soft);
+    border: 1px solid var(--cb-line);
+    border-radius: 8px;
+    font-size: 9px;
+}
+
+#chibiBoss-stats .cb-stats-chip .cb-chip-label {
+    color: var(--cb-accent);
+    letter-spacing: 1px;
+}
+
+#chibiBoss-stats .cb-stats-chip .cb-chip-value {
+    color: var(--cb-text);
+    font-size: 10px;
+}
+
+/* ===== Чекбокс «Рабочий стол» ===== */
+#chibiBoss-settings .chibiBoss-checkrow {
+    display: flex;
+    align-items: center;
+    justify-content: flex-start;
+    gap: 8px;
+    margin: 10px 0;
+    text-align: left;
+}
+
+#chibiBoss-settings .chibiBoss-checkrow input[type="checkbox"] {
+    width: 16px;
+    height: 16px;
+    min-width: 16px;
+    max-width: 16px;
+    margin: 0;
+    flex: 0 0 16px;
+    cursor: pointer;
+    position: relative;
+}
+
+#chibiBoss-settings .chibiBoss-checkrow label {
+    min-width: 0;
+    width: auto;
+    flex: 1 1 auto;
+    white-space: nowrap;
+    cursor: pointer;
+}
+
+/* ===== Речевой пузырёк босса ===== */
+#chibiBoss-bubble {
+    position: absolute;
+    padding: 8px 12px;
+    background: color-mix(in srgb, var(--cb-panel) 88%, #fff 12%);
+    color: var(--cb-text);
+    font-family: 'cbPixel', monospace;
+    font-size: 11px;
+    line-height: 1.5;
+    border-radius: 10px;
+    border: 1px solid var(--cb-line);
+    pointer-events: none;
+    z-index: 10003;
+    max-width: 240px;
+    white-space: normal;
+    word-break: break-word;
+    text-align: center;
+    box-shadow: 0 2px 6px rgba(0, 0, 0, 0.4);
+    opacity: 0;
+    transform: translateY(5px);
+    transition: opacity .2s ease, transform .2s ease;
+}
+
+#chibiBoss-bubble.show {
+    opacity: 1;
+    transform: translateY(0);
+}
+
+#chibiBoss-bubble::after {
+    content: '';
+    position: absolute;
+    bottom: -6px;
+    left: 50%;
+    transform: translateX(-50%);
+    width: 0;
+    height: 0;
+    border-left: 6px solid transparent;
+    border-right: 6px solid transparent;
+    border-top: 6px solid color-mix(in srgb, var(--cb-panel) 88%, #fff 12%);
+}
+
+/* ===== Общий борд игры (перетаскиваемый) ===== */
+.cb-game-board {
+    position: absolute;
+    z-index: 10001;
+    pointer-events: auto;
+    display: none;
+    background: linear-gradient(160deg, var(--cb-panel) 0%, var(--cb-panel-deep) 100%);
+    backdrop-filter: blur(10px);
+    -webkit-backdrop-filter: blur(10px);
+    border: 3px solid var(--cb-accent);
+    border-radius: 14px;
+    box-shadow: 0 8px 24px rgba(0, 0, 0, 0.55),
+                inset 0 0 0 2px var(--cb-fill-soft);
+    font-family: 'cbPixel', monospace;
+    color: var(--cb-text);
+    overflow: hidden;
+    padding-bottom: 14px;
+    user-select: none;
+}
+
+/* шапка борда */
+.cb-game-head {
+    position: relative;
+    height: 30px;
+    background: linear-gradient(180deg, var(--cb-header) 0%, var(--cb-header-2) 100%);
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 0 8px;
+    cursor: grab;               /* за шапку таскаем */
+}
+
+.cb-game-head.dragging {
+    cursor: grabbing;
+}
+
+/* левая группа кнопок управления */
+.cb-game-controls {
+    display: flex;
+    gap: 5px;
+    align-items: center;
+}
+
+.cb-game-btn {
+    font-family: 'cbPixel', monospace;
+    font-size: 10px;
+    color: var(--cb-text);
+    background: var(--cb-fill);
+    border: 1px solid var(--cb-line);
+    border-radius: 6px;
+    padding: 3px 7px;
+    cursor: pointer;
+    line-height: 1;
+}
+
+.cb-game-btn:hover {
+    background: var(--cb-line);
+}
+
+/* счётчик побед/поражений справа */
+.cb-game-score {
+    display: flex;
+    gap: 10px;
+    align-items: center;
+    font-size: 11px;
+    color: var(--cb-text);
+    filter: drop-shadow(0 1px 2px rgba(0, 0, 0, 0.7));
+}
+
+.cb-game-score span {
+    display: inline-flex;
+    align-items: center;
+    gap: 3px;
+}
+
+/* статус игры (чей ход / победа) */
+.cb-game-status {
+    text-align: center;
+    font-size: 10px;
+    letter-spacing: 1px;
+    color: var(--cb-accent);
+    margin: 10px 0 6px 0;
+    min-height: 12px;
+}
+
+/* таймер партии */
+.cb-game-timer {
+    text-align: center;
+    font-size: 9px;
+    color: var(--cb-text-dim);
+    margin: 2px 0 4px 0;
+}
+
+/* ===== Крестики-нолики ===== */
+.cb-ttt-grid {
+    display: grid;
+    grid-template-columns: repeat(3, 64px);
+    grid-template-rows: repeat(3, 64px);
+    gap: 4px;
+    justify-content: center;
+    margin: 4px auto 0;
+}
+
+.cb-ttt-cell {
+    background: var(--cb-fill-soft);
+    border: 2px solid var(--cb-line);
+    border-radius: 8px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 36px;
+    font-family: 'cbPixel', monospace;
+    cursor: pointer;
+    transition: background .12s ease;
+}
+
+.cb-ttt-cell:hover {
+    background: var(--cb-fill);
+}
+
+.cb-ttt-cell.x {
+    color: var(--cb-accent2);       /* крестик игрока */
+}
+
+.cb-ttt-cell.o {
+    color: var(--cb-accent);        /* нолик босса */
+}
+
+.cb-ttt-cell.win {
+    background: color-mix(in srgb, var(--cb-accent2) 30%, transparent);
+    border-color: var(--cb-accent2);
+}
+
+/* ===== Шашки ===== */
+.cb-checkers-wrap {
+    display: flex;
+    gap: 8px;
+    justify-content: center;
+    align-items: flex-start;
+    margin-top: 4px;
+}
+
+.cb-checkers-grid {
+    display: grid;
+    grid-template-columns: repeat(8, 38px);
+    grid-template-rows: repeat(8, 38px);
+    border: 2px solid var(--cb-accent);
+    border-radius: 4px;
+    overflow: hidden;
+}
+
+.cb-ch-cell {
+    width: 38px;
+    height: 38px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    position: relative;
+}
+
+.cb-ch-cell.light { background: color-mix(in srgb, var(--cb-accent) 24%, var(--cb-panel)); }
+.cb-ch-cell.dark  { background: var(--cb-panel-deep); }
+
+.cb-ch-cell.playable {
+    cursor: pointer;
+}
+
+.cb-ch-cell.selected {
+    box-shadow: inset 0 0 0 3px var(--cb-accent2);
+}
+
+.cb-ch-cell.target::after {
+    content: '';
+    position: absolute;
+    width: 12px;
+    height: 12px;
+    border-radius: 50%;
+    background: color-mix(in srgb, var(--cb-accent2) 60%, transparent);
+}
+
+/* фишки */
+.cb-piece {
+    width: 24px;
+    height: 24px;
+    border-radius: 50%;
+    box-shadow: 0 2px 3px rgba(0, 0, 0, 0.5);
+    position: relative;
+}
+
+.cb-piece.player {
+    background: radial-gradient(circle at 35% 30%,
+        color-mix(in srgb, var(--cb-accent) 45%, #fff),
+        var(--cb-accent));
+    border: 2px solid color-mix(in srgb, var(--cb-accent) 55%, #fff);
+}
+
+.cb-piece.ai {
+    background: radial-gradient(circle at 35% 30%, #6a6a7a, #2a2a35);
+    border: 2px solid #4a4a5a;
+}
+
+/* дамка — корона по центру */
+.cb-piece.king::after {
+    content: '♛';
+    position: absolute;
+    inset: 0;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 14px;
+    color: #ffd700;
+    text-shadow: 0 1px 1px rgba(0, 0, 0, 0.6);
+}
+
+/* съеденные фишки сбоку */
+.cb-captured {
+    display: flex;
+    flex-direction: column;
+    gap: 3px;
+    width: 62px;            /* было 50px — слово «съедено» обрезалось */
+}
+
+.cb-captured-row {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 2px;
+    min-height: 14px;
+}
+
+.cb-cap-mini {
+    width: 16px;
+    height: 16px;
+    border-radius: 50%;
+}
+
+.cb-cap-mini.player {
+    background: var(--cb-accent);
+}
+
+.cb-cap-mini.ai {
+    background: #4a4a5a;
+}
+
+.cb-cap-label {
+    font-size: 9px;
+    color: var(--cb-accent);
+    text-align: center;
+    letter-spacing: 0;      /* убрали разрядку, чтобы слово влезло */
+    white-space: nowrap;    /* не переносим слово по буквам */
+}
+
+/* ===== Галерея подарков ===== */
+.cb-gifts-title {
+    font-size: 11px;
+    letter-spacing: 2px;
+    color: var(--cb-text);
+    text-transform: uppercase;
+}
+
+.cb-gifts-grid {
+    display: grid;
+    grid-template-columns: repeat(4, 1fr);
+    gap: 10px;
+    padding: 12px;
+    max-height: 440px;
+    overflow-y: auto;
+}
+
+.cb-gifts-grid::-webkit-scrollbar { width: 4px; }
+.cb-gifts-grid::-webkit-scrollbar-track { background: transparent; }
+.cb-gifts-grid::-webkit-scrollbar-thumb { background: var(--cb-line); border-radius: 2px; }
+
+.cb-gift-slot {
+    aspect-ratio: 1;
+    border-radius: 8px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    position: relative;
+    overflow: hidden;
+    transition: transform .15s ease, box-shadow .15s ease;
+}
+
+.cb-gift-slot.locked {
+    background: var(--cb-fill-soft);
+    border: 2px dashed var(--cb-line);
+    cursor: default;
+}
+
+.cb-gift-slot.unlocked {
+    background: var(--cb-fill);
+    border: 2px solid var(--cb-line-strong);
+    cursor: pointer;
+    box-shadow: 0 2px 8px color-mix(in srgb, var(--cb-accent) 20%, transparent);
+}
+
+.cb-gift-slot.unlocked:hover {
+    transform: translateY(-3px) scale(1.05);
+    box-shadow: 0 6px 18px color-mix(in srgb, var(--cb-accent) 45%, transparent);
+    border-color: var(--cb-accent);
+}
+
+.cb-gift-slot img {
+    width: 75%;
+    height: 75%;
+    object-fit: contain;
+    image-rendering: pixelated;
+    pointer-events: none;
+}
+
+.cb-gift-lock {
+    font-size: 22px;
+    opacity: 0.35;
+}
+
+/* ===== Плашка открытого подарка ===== */
+#chibiBoss-gift-detail {
+    position: absolute;
+    z-index: 10005;
+    width: 280px;
+    padding: 24px 20px 20px;
+    background: linear-gradient(160deg, var(--cb-panel) 0%, var(--cb-panel-deep) 100%);
+    backdrop-filter: blur(12px);
+    -webkit-backdrop-filter: blur(12px);
+    border: 3px solid var(--cb-accent);
+    border-radius: 16px;
+    box-shadow: 0 12px 32px rgba(0,0,0,0.7),
+                inset 0 0 0 2px var(--cb-fill-soft);
+    font-family: 'cbPixel', monospace;
+    color: var(--cb-text);
+    display: none;
+    flex-direction: column;
+    align-items: center;
+    gap: 10px;
+    opacity: 0;
+    transform: scale(0.85);
+    transition: opacity .2s ease, transform .2s ease;
+    top: 50%;
+    left: 50%;
+    translate: -50% -50%;
+    pointer-events: auto;
+}
+
+#chibiBoss-gift-detail.show {
+    opacity: 1;
+    transform: scale(1);
+    translate: -50% -50%;
+}
+
+.cb-gd-close {
+    position: absolute;
+    top: 8px; right: 10px;
+    font-size: 12px;
+    color: var(--cb-text-dim);
+    cursor: pointer;
+}
+.cb-gd-close:hover { color: var(--cb-text); }
+
+.cb-gd-glow {
+    position: absolute;
+    inset: 0;
+    border-radius: 14px;
+    background: radial-gradient(ellipse at 50% 30%,
+        color-mix(in srgb, var(--cb-accent) 15%, transparent) 0%, transparent 70%);
+    pointer-events: none;
+}
+
+.cb-gd-img {
+    width: 120px;
+    height: 120px;
+    object-fit: contain;
+    image-rendering: pixelated;
+}
+
+.cb-gd-name {
+    font-size: 12px;
+    letter-spacing: 1px;
+    text-align: center;
+    color: var(--cb-accent);
+}
+.cb-gd-desc {
+    font-size: 10px;
+    line-height: 1.6;
+    text-align: center;
+    color: var(--cb-text-dim);
+    padding: 0 16px;
+    max-width: 250px;
+}
+
+.cb-gd-date {
+    font-size: 9px;
+    opacity: 0.55;
+    text-align: center;
+}
+
+/* ===== Иконка-уведомление о подарке ===== */
+#chibiBoss-gift-alert {
+    position: absolute;
+    width: 40px;
+    height: 40px;
+    z-index: 10004;
+    pointer-events: auto;
+    cursor: pointer;
+    display: none;
+    animation: cb-gift-pulse 1.1s ease-in-out infinite;
+    transform-origin: center center;
+    transition: left .2s linear, top .2s linear;
+}
+
+#chibiBoss-gift-alert img {
+    width: 100%;
+    height: 100%;
+    object-fit: contain;
+    image-rendering: pixelated;
+    pointer-events: none;
+}
+
+@keyframes cb-gift-pulse {
+    0%, 100% { transform: scale(1); }
+    50%      { transform: scale(1.18); }
+}
+
+/* ===== Коллекция писем ===== */
+.cb-letters-title {
+    font-size: 11px;
+    letter-spacing: 2px;
+    color: var(--cb-text);
+    text-transform: uppercase;
+}
+
+.cb-letters-grid {
+    display: grid;
+    grid-template-columns: repeat(3, 1fr);
+    gap: 10px;
+    padding: 12px;
+    max-height: 440px;
+    overflow-y: auto;
+}
+
+.cb-letters-grid::-webkit-scrollbar { width: 4px; }
+.cb-letters-grid::-webkit-scrollbar-track { background: transparent; }
+.cb-letters-grid::-webkit-scrollbar-thumb { background: var(--cb-line); border-radius: 2px; }
+
+.cb-letters-empty {
+    grid-column: 1 / -1;
+    text-align: center;
+    font-size: 10px;
+    color: var(--cb-text-dim);
+    line-height: 1.7;
+    padding: 30px 16px;
+    letter-spacing: 1px;
+}
+
+.cb-letter-card {
+    aspect-ratio: 4/3;
+    border-radius: 8px;
+    background: linear-gradient(150deg, var(--cb-panel) 0%, var(--cb-panel-deep) 100%);
+    border: 2px solid var(--cb-line-strong);
+    position: relative;
+    cursor: pointer;
+    overflow: hidden;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    transition: transform .15s ease, box-shadow .15s ease;
+    box-shadow: 0 2px 8px rgba(0,0,0,0.5);
+}
+
+/* ── карточка-комментарий (реплика босса) ── */
+.cb-comment-card {
+    aspect-ratio: 4/3;
+    border-radius: 8px;
+    background: linear-gradient(150deg, var(--cb-panel-deep) 0%, var(--cb-panel) 100%);
+    border: 2px solid var(--cb-line);
+    border-left: 4px solid var(--cb-accent);
+    position: relative;
+    cursor: pointer;
+    overflow: hidden;
+    display: flex;
+    flex-direction: column;
+    justify-content: center;
+    padding: 8px 10px;
+    transition: transform .15s ease, box-shadow .15s ease;
+    box-shadow: 0 2px 8px rgba(0,0,0,0.5);
+}
+
+.cb-comment-card:hover {
+    transform: translateY(-3px) scale(1.04);
+    box-shadow: 0 6px 18px color-mix(in srgb, var(--cb-accent) 40%, transparent);
+    border-color: var(--cb-accent);
+}
+
+.cb-comment-quote {
+    position: absolute;
+    top: 0; left: 6px;
+    font-size: 28px;
+    color: var(--cb-line-strong);
+    line-height: 1;
+    font-family: Georgia, serif;
+}
+
+.cb-comment-preview {
+    font-family: 'cbPixel', monospace;
+    font-size: 8px;
+    line-height: 1.45;
+    color: var(--cb-text);
+    z-index: 1;
+    max-height: 60%;
+    overflow: hidden;
+}
+
+.cb-comment-date {
+    position: absolute;
+    bottom: 4px;
+    left: 10px;
+    font-family: 'cbPixel', monospace;
+    font-size: 7px;
+    color: var(--cb-text-dim);
+    letter-spacing: 1px;
+}
+
+.cb-comment-card.unread::after {
+    content: '';
+    position: absolute;
+    top: 4px; right: 4px;
+    width: 8px; height: 8px;
+    border-radius: 50%;
+    background: var(--cb-accent);
+    box-shadow: 0 0 6px var(--cb-accent);
+    z-index: 3;
+}
+
+/* текст комментария в детальном виде — курсив, как реплика */
+.cb-ld-text-comment {
+    font-style: italic;
+    color: var(--cb-accent);
+}
+
+.cb-letter-card:hover {
+    transform: translateY(-3px) scale(1.04);
+    box-shadow: 0 6px 18px color-mix(in srgb, var(--cb-accent) 40%, transparent);
+    border-color: var(--cb-accent);
+}
+
+.cb-letter-card::before {
+    content: '';
+    position: absolute;
+    top: 0; left: 0; right: 0;
+    height: 45%;
+    background: linear-gradient(150deg,
+        color-mix(in srgb, var(--cb-accent) 18%, transparent) 0%,
+        color-mix(in srgb, var(--cb-accent) 22%, transparent) 100%);
+    clip-path: polygon(0 0, 100% 0, 50% 100%);
+    border-bottom: 1px solid var(--cb-line);
+}
+
+.cb-letter-seal {
+    position: absolute;
+    top: 28%;
+    left: 50%;
+    transform: translate(-50%, -50%);
+    width: 22px;
+    height: 22px;
+    border-radius: 50%;
+    background: radial-gradient(circle at 35% 30%, #ff6b5b, #a01f1f);
+    box-shadow: 0 1px 4px rgba(0,0,0,0.7);
+    z-index: 2;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 11px;
+    color: #ffd9d0;
+}
+
+.cb-letter-date {
+    position: absolute;
+    bottom: 5px;
+    left: 0; right: 0;
+    text-align: center;
+    font-family: 'cbPixel', monospace;
+    font-size: 8px;
+    color: var(--cb-text-dim);
+    letter-spacing: 1px;
+    z-index: 2;
+}
+
+.cb-letter-card.unread::after {
+    content: '';
+    position: absolute;
+    top: 4px; right: 4px;
+    width: 8px; height: 8px;
+    border-radius: 50%;
+    background: var(--cb-accent);
+    box-shadow: 0 0 6px var(--cb-accent);
+    z-index: 3;
+}
+
+.cb-letter-del {
+    position: absolute;
+    bottom: 4px; right: 4px;
+    width: 16px; height: 16px;
+    border-radius: 50%;
+    background: rgba(180,60,60,0.75);
+    color: #fff;
+    font-size: 8px;
+    display: flex; align-items: center; justify-content: center;
+    cursor: pointer;
+    z-index: 4;
+    opacity: 0;
+    transition: opacity .15s;
+}
+.cb-letter-card:hover .cb-letter-del,
+.cb-comment-card:hover .cb-letter-del {
+    opacity: 1;
+}
+
+
+#chibiBoss-letter-detail {
+    position: absolute;
+    z-index: 10005;
+    width: 360px;
+    max-height: 320px;
+    background: linear-gradient(160deg, var(--cb-panel) 0%, var(--cb-panel-deep) 100%);
+    backdrop-filter: blur(12px);
+    -webkit-backdrop-filter: blur(12px);
+    border: 3px solid var(--cb-accent);
+    border-radius: 14px;
+    box-shadow: 0 14px 38px rgba(0,0,0,0.7),
+                inset 0 0 0 2px var(--cb-fill-soft);
+    font-family: 'cbPixel', monospace;
+    color: var(--cb-text);
+    display: none;
+    flex-direction: column;
+    opacity: 0;
+    transform: scale(0.92);
+    transition: opacity .2s ease, transform .2s ease;
+    pointer-events: auto;
+    overflow: hidden;
+}
+
+#chibiBoss-letter-detail.show {
+    opacity: 1;
+    transform: scale(1);
+}
+
+.cb-ld-head {
+    height: 28px;
+    background: linear-gradient(180deg, var(--cb-header) 0%, var(--cb-header-2) 100%);
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 0 10px;
+    cursor: grab;
+    flex: 0 0 auto;
+    touch-action: none;
+}
+
+.cb-ld-head.dragging { cursor: grabbing; }
+
+.cb-ld-head-title {
+    font-size: 9px;
+    letter-spacing: 2px;
+    text-transform: uppercase;
+    color: var(--cb-text);
+}
+
+.cb-ld-close {
+    font-size: 12px;
+    color: var(--cb-text);
+    cursor: pointer;
+    line-height: 1;
+    opacity: 0.8;
+}
+.cb-ld-close:hover { opacity: 1; }
+
+.cb-ld-body {
+    padding: 14px 16px;
+    overflow-y: auto;
+    flex: 1 1 auto;
+}
+
+.cb-ld-body::-webkit-scrollbar { width: 4px; }
+.cb-ld-body::-webkit-scrollbar-track { background: transparent; }
+.cb-ld-body::-webkit-scrollbar-thumb { background: var(--cb-line); border-radius: 2px; }
+
+.cb-ld-text {
+    font-size: 11px;
+    line-height: 1.7;
+    white-space: pre-wrap;
+    word-break: break-word;
+    color: var(--cb-text);
+}
+
+.cb-ld-sign {
+    margin-top: 12px;
+    text-align: right;
+    font-size: 10px;
+    color: var(--cb-text-dim);
+    font-style: italic;
+}
+
+.cb-ld-footer {
+    flex: 0 0 auto;
+    display: flex;
+    align-items: center;
+    justify-content: flex-end;
+    padding: 6px 14px 8px;
+    border-top: 1px solid var(--cb-line);
+    gap: 10px;
+}
+
+.cb-ld-footer-seal {
+    width: 24px; height: 24px;
+    border-radius: 50%;
+    background: radial-gradient(circle at 35% 30%, #ff6b5b, #a01f1f);
+    box-shadow: 0 2px 4px rgba(0,0,0,0.5);
+    display: flex; align-items: center; justify-content: center;
+    font-size: 11px; color: #ffd9d0;
+}
+
+.cb-ld-footer-date {
+    font-size: 8px;
+    color: var(--cb-text-dimmer);
+    letter-spacing: 1px;
+}
+
+#chibiBoss-letter-detail ::selection {
+    background: var(--cb-fill);
+    color: var(--cb-text);
+}
+
+#chibiBoss-letter-alert {
+    position: absolute;
+    width: 38px;
+    height: 38px;
+    z-index: 10004;
+    pointer-events: auto;
+    cursor: pointer;
+    display: none;
+    animation: cb-letter-pulse 1.1s ease-in-out infinite;
+    transform-origin: center center;
+}
+
+#chibiBoss-letter-alert img {
+    width: 100%;
+    height: 100%;
+    object-fit: contain;
+    image-rendering: pixelated;
+    pointer-events: none;
+}
+
+@keyframes cb-letter-pulse {
+    0%, 100% { transform: scale(1); }
+    50%       { transform: scale(1.18); }
+}
+
+/* ===== Кнопки блока API (тема Таверны) ===== */
+#cb-api-refresh,
+.cb-api-test-btn {
+    font-family: inherit;
+    color: var(--SmartThemeBodyColor, #ddd);
+    background-color: var(--black30a, rgba(0, 0, 0, 0.3));
+    border: 1px solid var(--SmartThemeBorderColor, rgba(255, 255, 255, 0.2));
+    border-radius: 8px;
+    cursor: pointer;
+    transition: background-color .15s ease, border-color .15s ease;
+}
+
+.cb-api-test-btn {
+    padding: 6px 14px;
+    font-size: 0.85em;
+}
+
+#cb-api-refresh {
+    width: 32px;
+    height: 32px;
+    flex: 0 0 32px;
+    font-size: 16px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+}
+
+#cb-api-refresh:hover,
+.cb-api-test-btn:hover {
+    background-color: var(--white30a, rgba(255, 255, 255, 0.12));
+    border-color: var(--SmartThemeQuoteColor, #ff9c5b);
+}
+
+#cb-api-refresh.spinning {
+    animation: cb-api-spin 0.8s linear infinite;
+}
+
+@keyframes cb-api-spin {
+    to { transform: rotate(360deg); }
+}
+
+.cb-api-status { font-size: 0.8em; opacity: 0.85; }
+.cb-api-status.ok  { color: #7ddc7d; }
+.cb-api-status.err { color: #ff7d7d; }
