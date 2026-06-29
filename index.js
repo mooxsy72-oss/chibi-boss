@@ -618,11 +618,43 @@ function apiIsConnected() {
 }
 
 // нормализуем URL: убираем хвостовой слэш и /v1 если юзер его дописал
-function apiBaseUrl() {
-    let u = (apiSettings.url || '').trim().replace(/\/+$/, '');
-    u = u.replace(/\/v1$/, '');
-    return u;
+// если уже нашли рабочий путь — используем его
+// базовый URL как ввёл пользователь (без хвостового слэша)
+function apiUserBase() {
+    return (apiSettings.url || '').trim().replace(/\/+$/, '');
 }
+
+// варианты ПОЛНОГО адреса для СПИСКА МОДЕЛЕЙ (GET)
+// перебираем и "вверх" по пути, т.к. у OnlySQ модели лежат отдельно от чата
+function apiModelsCandidates() {
+    const u = apiUserBase();
+    const noV1 = u.replace(/\/v\d+$/, '');  // убираем /v1, /v2, /v3 и т.д.
+    const noOpenai = noV1.replace(/\/openai$/, '');
+    const list = [];
+    if (apiSettings.resolvedModelsUrl) list.push(apiSettings.resolvedModelsUrl); // рабочий первым
+    list.push(u + '/models');
+    list.push(u + '/v1/models');
+    list.push(noV1 + '/models');
+    list.push(noOpenai + '/models');     // ← для OnlySQ: .../ai/models
+    list.push(noOpenai + '/v1/models');
+    return [...new Set(list)]; // убираем повторы
+}
+
+// варианты ПОЛНОГО адреса для ЧАТА (POST)
+function apiChatCandidates() {
+    const u = apiUserBase();
+    const noV1 = u.replace(/\/v\d+$/, '');
+    const list = [];
+    if (apiSettings.resolvedChatUrl) list.push(apiSettings.resolvedChatUrl); // рабочий первым
+    list.push(u + '/chat/completions');
+    list.push(u + '/v1/chat/completions');   // ← для OnlySQ: .../ai/openai/v1/chat/completions
+    list.push(noV1 + '/chat/completions');
+    list.push(noV1 + '/v1/chat/completions');
+    return [...new Set(list)];
+}
+
+
+
 
 // заголовки для запроса к своему API
 function apiHeaders() {
@@ -637,28 +669,38 @@ async function apiTestConnection() {
     if (apiSettings.mode === 'off') {
         return { ok: false, message: 'Подключение выключено.' };
     }
-
     if (!apiSettings.url) {
         return { ok: false, message: 'Укажите URL.' };
     }
-    try {
-        const res = await fetch(apiBaseUrl() + '/v1/models', {
-            method: 'GET',
-            headers: apiHeaders(),
-        });
-        if (!res.ok) return { ok: false, message: `Ошибка ${res.status}: ${res.statusText}` };
-        return { ok: true, message: 'Соединение успешно.' };
-    } catch (e) {
-        return { ok: false, message: 'Не удалось подключиться: ' + e.message };
+
+    let lastError = '';
+    // перебираем варианты адреса моделей, пока один не сработает
+    for (const modelsUrl of apiModelsCandidates()) {
+        try {
+            const res = await fetch(modelsUrl, {
+                method: 'GET',
+                headers: apiHeaders(),
+            });
+            if (res.ok) {
+                apiSettings.resolvedModelsUrl = modelsUrl; // запомнили рабочий адрес
+                saveApiSettings();
+                return { ok: true, message: 'Соединение успешно.' };
+            }
+            lastError = `Ошибка ${res.status}: ${res.statusText}`;
+        } catch (e) {
+            lastError = 'Не удалось подключиться: ' + e.message;
+        }
     }
+    return { ok: false, message: lastError || 'Не удалось подключиться.' };
 }
+
+
 
 async function apiGenerate(systemPrompt, userPrompt, maxTokens = 200) {
     if (apiSettings.mode === 'off') {
         console.warn('[ChibiBoss] API выключен');
         return null;
     }
-
     if (!apiSettings.url || !apiSettings.model) {
         console.warn('[ChibiBoss] Неполные настройки API:', {
             url: apiSettings.url,
@@ -667,76 +709,61 @@ async function apiGenerate(systemPrompt, userPrompt, maxTokens = 200) {
         return null;
     }
 
-    try {
-        const payload = {
-            model: apiSettings.model,
-            messages: [
-                { role: 'system', content: systemPrompt },
-                { role: 'user', content: userPrompt },
-            ],
-            max_tokens: maxTokens,
-            temperature: 0.9,
-        };
+    const payload = {
+        model: apiSettings.model,
+        messages: [
+            { role: 'system', content: systemPrompt },
+            { role: 'user', content: userPrompt },
+        ],
+        max_tokens: maxTokens,
+        temperature: 0.9,
+    };
 
-        console.log('[ChibiBoss] Отправляю запрос:', {
-            url: apiBaseUrl() + '/v1/chat/completions',
-            model: payload.model,
-            systemLength: systemPrompt.length,
-            userLength: userPrompt.length
-        });
+    // перебираем варианты адреса чата, пока один не сработает
+    for (const chatUrl of apiChatCandidates()) {
+        try {
+            console.log('[ChibiBoss] Пробую адрес чата:', chatUrl);
+            const res = await fetch(chatUrl, {
+                method: 'POST',
+                headers: apiHeaders(),
+                body: JSON.stringify(payload),
+            });
 
-        const res = await fetch(apiBaseUrl() + '/v1/chat/completions', {
-            method: 'POST',
-            headers: apiHeaders(),
-            body: JSON.stringify(payload),
-        });
+            if (!res.ok) {
+                const errText = await res.text().catch(() => '');
+                console.warn('[ChibiBoss] адрес не подошёл:', chatUrl, res.status, errText.slice(0, 120));
+                continue; // пробуем следующий вариант
+            }
 
-        if (!res.ok) {
-            const errText = await res.text().catch(() => 'не удалось прочитать ошибку');
-            console.error('[ChibiBoss] Ошибка API:', res.status, res.statusText, errText);
-            return null;
+            const data = await res.json();
+
+            // Пробуем извлечь текст из всех возможных мест
+            let text = null;
+            if (data?.choices?.[0]?.message?.content) text = data.choices[0].message.content;
+            else if (data?.choices?.[0]?.text) text = data.choices[0].text;
+            else if (data?.choices?.[0]?.delta?.content) text = data.choices[0].delta.content;
+            else if (data?.content) text = data.content;
+            else if (data?.response) text = data.response;
+
+            if (!text || !String(text).trim()) {
+                console.warn('[ChibiBoss] пустой ответ от', chatUrl, data);
+                continue;
+            }
+
+            apiSettings.resolvedChatUrl = chatUrl; // запомнили рабочий адрес
+            saveApiSettings();
+            console.log('[ChibiBoss] Ответ получен:', String(text).slice(0, 100));
+            return String(text).trim();
+
+        } catch (e) {
+            console.warn('[ChibiBoss] ошибка на адресе', chatUrl, e);
         }
-
-        const data = await res.json();
-
-        // Пробуем извлечь текст из всех возможных мест
-        let text = null;
-
-        // Вариант 1: OpenAI формат
-        if (data?.choices?.[0]?.message?.content) {
-            text = data.choices[0].message.content;
-        }
-        // Вариант 2: некоторые Gemini прокси
-        else if (data?.choices?.[0]?.text) {
-            text = data.choices[0].text;
-        }
-        // Вариант 3: старый completion формат
-        else if (data?.choices?.[0]?.delta?.content) {
-            text = data.choices[0].delta.content;
-        }
-        // Вариант 4: прямо в корне
-        else if (data?.content) {
-            text = data.content;
-        }
-        // Вариант 5: в response
-        else if (data?.response) {
-            text = data.response;
-        }
-
-        if (!text || !String(text).trim()) {
-            console.warn('[ChibiBoss] API вернул пустой ответ. Структура ответа:', data);
-            console.warn('[ChibiBoss] Проверяю choices[0]:', data?.choices?.[0]);
-            return null;
-        }
-
-        console.log('[ChibiBoss] Ответ получен:', String(text).slice(0, 100));
-        return String(text).trim();
-
-    } catch (e) {
-        console.error('[ChibiBoss] Исключение при генерации:', e);
-        return null;
     }
+
+    console.error('[ChibiBoss] ни один адрес чата не сработал');
+    return null;
 }
+
 
 
 
@@ -765,21 +792,31 @@ async function apiGenerateWithRetry(systemPrompt, userPrompt, maxTokens = 200, r
 // возвращает массив строк-id моделей
 async function apiFetchModels() {
     if (apiSettings.mode !== 'api' || !apiSettings.url) return [];
-    try {
-        const res = await fetch(apiBaseUrl() + '/v1/models', {
-            method: 'GET',
-            headers: apiHeaders(),
-        });
-        if (!res.ok) return [];
-        const data = await res.json();
-        // формат OpenAI: { data: [ { id: '...' }, ... ] }
-        const list = Array.isArray(data.data) ? data.data : (Array.isArray(data) ? data : []);
-        return list.map(m => (typeof m === 'string' ? m : m.id)).filter(Boolean);
-    } catch (e) {
-        console.warn('[ChibiBoss] не удалось получить модели:', e);
-        return [];
+    // перебираем варианты адреса моделей, пока не получим список
+    for (const modelsUrl of apiModelsCandidates()) {
+        try {
+            const res = await fetch(modelsUrl, {
+                method: 'GET',
+                headers: apiHeaders(),
+            });
+            if (!res.ok) continue;
+            const data = await res.json();
+            // формат OpenAI: { data: [ { id: '...' }, ... ] }
+            const list = Array.isArray(data.data) ? data.data : (Array.isArray(data) ? data : []);
+            const models = list.map(m => (typeof m === 'string' ? m : m.id)).filter(Boolean);
+            if (models.length) {
+                apiSettings.resolvedModelsUrl = modelsUrl; // запомнили рабочий адрес
+                saveApiSettings();
+                return models;
+            }
+        } catch (e) {
+            console.warn('[ChibiBoss] вариант не подошёл:', modelsUrl, e);
+        }
     }
+    return [];
 }
+
+
 
 
 
@@ -3726,8 +3763,11 @@ function wireApiSettingsEvents() {
     // --- ввод URL ---
     urlEl.addEventListener('input', () => {
         apiSettings.url = urlEl.value.trim();
+        apiSettings.resolvedModelsUrl = ''; // сбрасываем найденные адреса
+        apiSettings.resolvedChatUrl = '';
         saveApiSettings();
     });
+
 
     // --- ввод ключа ---
     keyEl.addEventListener('input', () => {
