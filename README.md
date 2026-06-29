@@ -16,7 +16,9 @@
 1. Открой SillyTavern → **Extensions** → **Install extension**
 2. Вставь ссылку:
 
+```text
 https://github.com/mooxsy72-oss/chibi-boss
+```
 
 3. Нажми **Установить** — расширение установится автоматически
 4. Перезагрузи страницу
