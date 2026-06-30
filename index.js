@@ -628,30 +628,34 @@ function apiUserBase() {
 // перебираем и "вверх" по пути, т.к. у OnlySQ модели лежат отдельно от чата
 function apiModelsCandidates() {
     const u = apiUserBase();
-    const noV1 = u.replace(/\/v\d+$/, '');  // убираем /v1, /v2, /v3 и т.д.
-    const noOpenai = noV1.replace(/\/openai$/, '');
+    // всегда убираем /v1 /v2 и т.д. с конца — добавим сами в нужном порядке
+    const base = u.replace(/\/v\d+$/, '').replace(/\/openai$/, '');
     const list = [];
     if (apiSettings.resolvedModelsUrl) list.push(apiSettings.resolvedModelsUrl); // рабочий первым
-    list.push(u + '/models');
-    list.push(u + '/v1/models');
-    list.push(noV1 + '/models');
-    list.push(noOpenai + '/models');     // ← для OnlySQ: .../ai/models
-    list.push(noOpenai + '/v1/models');
-    return [...new Set(list)]; // убираем повторы
+    list.push(base + '/openai/models');    // OnlySQ (OpenAI-совместимый)
+    list.push(base + '/v1/models');        // самый стандартный
+    list.push(base + '/models');           // без v1
+    list.push(base + '/openai/v1/models'); // запасной вариант
+    return [...new Set(list)];
 }
+
+
 
 // варианты ПОЛНОГО адреса для ЧАТА (POST)
 function apiChatCandidates() {
     const u = apiUserBase();
-    const noV1 = u.replace(/\/v\d+$/, '');
+    const base = u.replace(/\/v\d+$/, '').replace(/\/openai$/, '');
     const list = [];
-    if (apiSettings.resolvedChatUrl) list.push(apiSettings.resolvedChatUrl); // рабочий первым
-    list.push(u + '/chat/completions');
-    list.push(u + '/v1/chat/completions');   // ← для OnlySQ: .../ai/openai/v1/chat/completions
-    list.push(noV1 + '/chat/completions');
-    list.push(noV1 + '/v1/chat/completions');
+    if (apiSettings.resolvedChatUrl) list.push(apiSettings.resolvedChatUrl);
+    list.push(base + '/openai/chat/completions');
+    list.push(base + '/v1/chat/completions');
+    list.push(base + '/chat/completions');
+    list.push(base + '/openai/v1/chat/completions');
     return [...new Set(list)];
 }
+
+
+
 
 
 
@@ -695,6 +699,49 @@ async function apiTestConnection() {
 }
 
 
+// извлекает текст ответа из ЛЮБОГО формата:
+// обычный JSON ИЛИ потоковый ответ (SSE, склеивает кусочки)
+function extractApiText(rawBody) {
+    if (!rawBody) return null;
+    const body = String(rawBody).trim();
+
+    // --- случай 1: потоковый ответ (строки вида "data: {...}") ---
+    if (body.includes('data:')) {
+        let acc = '';
+        const lines = body.split('\n');
+        for (const line of lines) {
+            const t = line.trim();
+            if (!t.startsWith('data:')) continue;
+            const payload = t.slice(5).trim();
+            if (!payload || payload === '[DONE]') continue;
+            try {
+                const obj = JSON.parse(payload);
+                const piece =
+                    obj?.choices?.[0]?.delta?.content ??
+                    obj?.choices?.[0]?.message?.content ??
+                    obj?.choices?.[0]?.text ?? '';
+                if (piece) acc += piece;
+            } catch (e) { /* битый кусок — пропускаем */ }
+        }
+        if (acc.trim()) return acc;
+    }
+
+    // --- случай 2: обычный цельный JSON ---
+    try {
+        const data = JSON.parse(body);
+        return (
+            data?.choices?.[0]?.message?.content ??
+            data?.choices?.[0]?.text ??
+            data?.choices?.[0]?.delta?.content ??
+            data?.content ??
+            data?.response ??
+            null
+        );
+    } catch (e) {
+        // вообще не JSON — вернём как есть
+        return body || null;
+    }
+}
 
 async function apiGenerate(systemPrompt, userPrompt, maxTokens = 200) {
     if (apiSettings.mode === 'off') {
@@ -719,8 +766,11 @@ async function apiGenerate(systemPrompt, userPrompt, maxTokens = 200) {
         temperature: 0.9,
     };
 
-    // перебираем варианты адреса чата, пока один не сработает
-    for (const chatUrl of apiChatCandidates()) {
+    // ВЕСЬ список адресов, который реально будет перебираться
+    const candidates = apiChatCandidates();
+    console.log('[ChibiBoss] СПИСОК АДРЕСОВ ЧАТА (' + candidates.length + ' шт.):', candidates);
+
+    for (const chatUrl of candidates) {
         try {
             console.log('[ChibiBoss] Пробую адрес чата:', chatUrl);
             const res = await fetch(chatUrl, {
@@ -731,38 +781,53 @@ async function apiGenerate(systemPrompt, userPrompt, maxTokens = 200) {
 
             if (!res.ok) {
                 const errText = await res.text().catch(() => '');
-                console.warn('[ChibiBoss] адрес не подошёл:', chatUrl, res.status, errText.slice(0, 120));
+                console.error('[ChibiBoss] ❌ ОШИБКА СЕРВЕРА:', chatUrl,
+                    '| статус:', res.status, '| ответ:', errText.slice(0, 400));
+
+                // Если сломался ЗАПОМНЕННЫЙ адрес — забываем его,
+                // чтобы он не лез первым в следующий раз.
+                if (chatUrl === apiSettings.resolvedChatUrl) {
+                    console.warn('[ChibiBoss] забываю плохой сохранённый адрес чата:', chatUrl);
+                    apiSettings.resolvedChatUrl = '';
+                    saveApiSettings();
+                }
                 continue; // пробуем следующий вариант
             }
 
-            const data = await res.json();
-
-            // Пробуем извлечь текст из всех возможных мест
-            let text = null;
-            if (data?.choices?.[0]?.message?.content) text = data.choices[0].message.content;
-            else if (data?.choices?.[0]?.text) text = data.choices[0].text;
-            else if (data?.choices?.[0]?.delta?.content) text = data.choices[0].delta.content;
-            else if (data?.content) text = data.content;
-            else if (data?.response) text = data.response;
+            // читаем тело КАК ТЕКСТ — работает и для JSON, и для потокового (SSE) ответа
+            const rawBody = await res.text();
+            console.log('[ChibiBoss] СЫРОЕ ТЕЛО ОТВЕТА:', rawBody.slice(0, 800));
+            const text = extractApiText(rawBody);
 
             if (!text || !String(text).trim()) {
-                console.warn('[ChibiBoss] пустой ответ от', chatUrl, data);
+                console.warn('[ChibiBoss] пустой ответ от', chatUrl, rawBody.slice(0, 200));
+                if (chatUrl === apiSettings.resolvedChatUrl) {
+                    apiSettings.resolvedChatUrl = '';
+                    saveApiSettings();
+                }
                 continue;
             }
 
-            apiSettings.resolvedChatUrl = chatUrl; // запомнили рабочий адрес
+            // успех — запоминаем рабочий адрес
+            apiSettings.resolvedChatUrl = chatUrl;
             saveApiSettings();
-            console.log('[ChibiBoss] Ответ получен:', String(text).slice(0, 100));
+            console.log('[ChibiBoss] ✅ Ответ получен с адреса:', chatUrl);
+            console.log('[ChibiBoss] Текст:', String(text).slice(0, 100));
             return String(text).trim();
 
         } catch (e) {
             console.warn('[ChibiBoss] ошибка на адресе', chatUrl, e);
+            if (chatUrl === apiSettings.resolvedChatUrl) {
+                apiSettings.resolvedChatUrl = '';
+                saveApiSettings();
+            }
         }
     }
 
     console.error('[ChibiBoss] ни один адрес чата не сработал');
     return null;
 }
+
 
 
 
@@ -3491,7 +3556,7 @@ async function generateLetter() {
     try {
         const sys = buildLetterSystemPrompt();
         const user = buildLetterUserPrompt();
-        const raw = await apiGenerateWithRetry(sys, user, apiSettings.maxTokens || 400, 2);
+        const raw = await apiGenerateWithRetry(sys, user, Math.max(apiSettings.maxTokens || 0, 600), 2);
         const parsed = parseLetterResponse(raw);
         if (parsed) {
             console.log('[ChibiBoss] письмо готово:', parsed.text.slice(0, 60));
@@ -3706,6 +3771,55 @@ function exitPetting() {
 // ------------------------------------------------------------
 //  НАСТРОЙКИ
 // ------------------------------------------------------------
+async function debugTestGenerate(type) {
+    const outEl = document.getElementById('cb-api-debug-out');
+    if (!outEl) return;
+
+    outEl.style.display = 'block';
+    outEl.style.color = 'var(--SmartThemeBodyColor, #ddd)';
+    outEl.textContent = type === 'letter'
+        ? '⏳ Генерирую тестовое письмо...'
+        : '⏳ Генерирую тестовый комментарий...';
+
+    try {
+        let sys, usr, tokens;
+        if (type === 'letter') {
+            sys    = buildLetterSystemPrompt();
+            usr    = buildLetterUserPrompt();
+            tokens = Math.max(apiSettings.maxTokens || 0, 600);
+        } else {
+            sys    = buildCommentSystemPrompt();
+            usr    = buildCommentUserPrompt();
+            tokens = 150;
+        }
+
+        const raw = await apiGenerateWithRetry(sys, usr, tokens, 2);
+
+        if (!raw || !String(raw).trim()) {
+            outEl.style.color = '#ff7d7d';
+            outEl.textContent = '❌ Пустой ответ — API ничего не вернул.';
+            return;
+        }
+
+        const text = type === 'letter'
+            ? (parseLetterResponse(raw)?.text || raw)
+            : (cleanCommentResponse(raw) || raw);
+
+        if (!text || !text.trim()) {
+            outEl.style.color = '#ffb97d';
+            outEl.textContent = '⚠️ Ответ получен, но после очистки стал пустым.\n\nRAW:\n' + String(raw).slice(0, 300);
+            return;
+        }
+
+        outEl.style.color = '#7ddc7d';
+        outEl.textContent = '✅ Успешно (' + text.length + ' симв.):\n\n' + text.slice(0, 400) + (text.length > 400 ? '…' : '');
+
+    } catch (e) {
+        outEl.style.color = '#ff7d7d';
+        outEl.textContent = '❌ Ошибка: ' + e.message;
+    }
+}
+
 function wireApiSettingsEvents() {
     const modeEl    = document.getElementById('cb-api-mode');
     const customBox = document.getElementById('cb-api-settings-block');
@@ -3781,6 +3895,7 @@ function wireApiSettingsEvents() {
         saveApiSettings();
     });
 
+
     // --- кнопка обновления списка моделей ---
     refreshEl.addEventListener('click', async () => {
         refreshEl.classList.add('spinning');
@@ -3851,6 +3966,24 @@ function wireApiSettingsEvents() {
             saveApiSettings();
         });
     }
+        // --- кнопки отладки генерации ---
+    const testLetterBtn  = document.getElementById('cb-api-test-letter');
+    const testCommentBtn = document.getElementById('cb-api-test-comment');
+
+    if (testLetterBtn) {
+        testLetterBtn.addEventListener('click', async () => {
+            testLetterBtn.disabled = true;
+            await debugTestGenerate('letter');
+            testLetterBtn.disabled = false;
+        });
+    }
+    if (testCommentBtn) {
+        testCommentBtn.addEventListener('click', async () => {
+            testCommentBtn.disabled = true;
+            await debugTestGenerate('comment');
+            testCommentBtn.disabled = false;
+        });
+    }
 }
 
 // HTML секции «Настройка API» (встраивается ВНУТРЬ панели Chibi Mafia Boss)
@@ -3895,8 +4028,19 @@ function buildApiSettingsHTML() {
             <button id="cb-api-test" class="cb-api-test-btn">Тест соединения</button>
             <span id="cb-api-test-status" class="cb-api-status"></span>
         </div>
+        <div class="chibiBoss-row" style="gap:6px; flex-wrap:wrap;">
+            <button id="cb-api-test-letter" class="cb-api-test-btn">🧪 Тест письма</button>
+            <button id="cb-api-test-comment" class="cb-api-test-btn">🧪 Тест комментария</button>
+        </div>
+        <div id="cb-api-debug-out" style="
+            font-size:10px; line-height:1.5; margin:6px 0 2px;
+            padding:6px 8px; border-radius:6px; display:none;
+            background:rgba(0,0,0,0.25); color:var(--SmartThemeBodyColor,#ddd);
+            white-space:pre-wrap; word-break:break-word; max-height:120px; overflow-y:auto;
+        "></div>
 
         <div class="chibiBoss-api-divider"></div>
+
 
         <div class="chibiBoss-api-section-title">Письма от босса</div>
         <div class="chibiBoss-checkrow">
