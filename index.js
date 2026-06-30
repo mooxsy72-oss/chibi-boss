@@ -291,12 +291,14 @@ let lettersData = loadLetters();
 const API_SETTINGS_KEY = 'chibiBoss_api';
 
 const defaultApiSettings = {
-    // --- подключение ---
-    mode: 'off',            // 'off' = без подключения | 'st' = профиль ST | 'custom' = свой API
-    url: '',                // базовый URL своего API (только для mode='custom')
-    key: '',                // ключ своего API (хранится ЛОКАЛЬНО у пользователя)
-    model: '',              // выбранная модель
-    models: [],             // список подтянутых моделей (для выпадашки)
+    mode: 'off',
+    url: '',
+    key: '',
+    model: '',
+    models: [],
+
+    // --- NEW: профиль ST ---
+    stProfile: '',              // ← ДОБАВЬ ЭТУ СТРОКУ
 
     // --- комментирование РП ---
     commentEnabled: false,  // босс комментирует ролевую
@@ -614,18 +616,18 @@ function initCommentListener() {
 
 // удобный флаг: есть ли рабочее подключение
 function apiIsConnected() {
+    if (apiSettings.mode === 'st') {
+        return !!(apiSettings.stProfile && getBossProfile(apiSettings.stProfile));
+    }
     return apiSettings.mode === 'api' && !!(apiSettings.url && apiSettings.model);
 }
 
-// нормализуем URL: убираем хвостовой слэш и /v1 если юзер его дописал
-// если уже нашли рабочий путь — используем его
-// базовый URL как ввёл пользователь (без хвостового слэша)
+// базовый URL от пользователя (без /v1, /models и т.д.)
 function apiUserBase() {
-    return (apiSettings.url || '').trim().replace(/\/+$/, '');
+    return (apiSettings.url || '').trim().replace(/\/+$/, ''); // убираем слэши справа
 }
 
 // варианты ПОЛНОГО адреса для СПИСКА МОДЕЛЕЙ (GET)
-// перебираем и "вверх" по пути, т.к. у OnlySQ модели лежат отдельно от чата
 function apiModelsCandidates() {
     const u = apiUserBase();
     // всегда убираем /v1 /v2 и т.д. с конца — добавим сами в нужном порядке
@@ -640,24 +642,27 @@ function apiModelsCandidates() {
 }
 
 
-
 // варианты ПОЛНОГО адреса для ЧАТА (POST)
 function apiChatCandidates() {
     const u = apiUserBase();
     const base = u.replace(/\/v\d+$/, '').replace(/\/openai$/, '');
     const list = [];
+
+    // Рабочий адрес (если найден ранее) — пробуем первым
     if (apiSettings.resolvedChatUrl) list.push(apiSettings.resolvedChatUrl);
+
+    // OnlySQ (БЕЗ v1 — документация подтверждает)
     list.push(base + '/openai/chat/completions');
+
+    // LinkAPI и стандарт OpenAI
     list.push(base + '/v1/chat/completions');
     list.push(base + '/chat/completions');
+
+    // Запасной вариант (на случай нестандартных провайдеров)
     list.push(base + '/openai/v1/chat/completions');
+
     return [...new Set(list)];
 }
-
-
-
-
-
 
 
 // заголовки для запроса к своему API
@@ -670,6 +675,28 @@ function apiHeaders() {
 // ----- ТЕСТ СОЕДИНЕНИЯ -----
 // возвращает { ok: bool, message: string }
 async function apiTestConnection() {
+    // ---- Режим профиля таверны ----
+    if (apiSettings.mode === 'st') {
+        if (!apiSettings.stProfile) {
+            return { ok: false, message: 'Профиль не выбран.' };
+        }
+        const profile = getBossProfile(apiSettings.stProfile);
+        if (!profile) {
+            return { ok: false, message: `Профиль "${apiSettings.stProfile}" не найден.` };
+        }
+        try {
+            const ctx = SillyTavern.getContext();
+            if (!ctx.ConnectionManagerRequestService) {
+                return { ok: false, message: 'Сервис профилей недоступен.' };
+            }
+            return { ok: true, message: `Профиль "${profile.name}" подключён (${profile.api || '—'}, модель: ${profile.model || '—'}).` };
+        } catch (e) {
+            return { ok: false, message: 'Ошибка проверки профиля: ' + e.message };
+        }
+    }
+
+
+    // ---- Режим прямого API ----
     if (apiSettings.mode === 'off') {
         return { ok: false, message: 'Подключение выключено.' };
     }
@@ -678,7 +705,6 @@ async function apiTestConnection() {
     }
 
     let lastError = '';
-    // перебираем варианты адреса моделей, пока один не сработает
     for (const modelsUrl of apiModelsCandidates()) {
         try {
             const res = await fetch(modelsUrl, {
@@ -686,7 +712,7 @@ async function apiTestConnection() {
                 headers: apiHeaders(),
             });
             if (res.ok) {
-                apiSettings.resolvedModelsUrl = modelsUrl; // запомнили рабочий адрес
+                apiSettings.resolvedModelsUrl = modelsUrl;
                 saveApiSettings();
                 return { ok: true, message: 'Соединение успешно.' };
             }
@@ -697,6 +723,7 @@ async function apiTestConnection() {
     }
     return { ok: false, message: lastError || 'Не удалось подключиться.' };
 }
+
 
 
 // извлекает текст ответа из ЛЮБОГО формата:
@@ -744,6 +771,24 @@ function extractApiText(rawBody) {
 }
 
 async function apiGenerate(systemPrompt, userPrompt, maxTokens = 200) {
+    // ---- Режим профиля таверны ----
+    if (apiSettings.mode === 'st') {
+        if (!apiSettings.stProfile) {
+            console.warn('[ChibiBoss] профиль не выбран');
+            return null;
+        }
+        try {
+            return await generateViaBossProfile(systemPrompt, userPrompt, maxTokens);
+        } catch (e) {
+            console.error('[ChibiBoss] ошибка генерации через профиль:', e);
+            return null;
+        }
+    }
+
+
+
+
+    // ---- СТАРАЯ ВЕТКА: прямое API ----
     if (apiSettings.mode === 'off') {
         console.warn('[ChibiBoss] API выключен');
         return null;
@@ -755,6 +800,7 @@ async function apiGenerate(systemPrompt, userPrompt, maxTokens = 200) {
         });
         return null;
     }
+
 
     const payload = {
         model: apiSettings.model,
@@ -852,6 +898,120 @@ async function apiGenerateWithRetry(systemPrompt, userPrompt, maxTokens = 200, r
     }
     return null;
 }
+// ============================================================
+//  ЧЕРЕЗ ПРОФИЛЬ ТАВЕРНЫ
+// ============================================================
+
+// Получить профиль по имени
+function getBossProfile(profileName) {
+    if (!profileName) return null;
+    try {
+        const ctx = SillyTavern.getContext();
+        const cm = ctx.extensionSettings?.connectionManager;
+        if (!cm?.profiles?.length) return null;
+        return cm.profiles.find(p => p.name === profileName) || null;
+    } catch {
+        return null;
+    }
+}
+
+// Извлечь текст из ответа профиля (любой формат)
+function extractBossResponse(resp) {
+    if (!resp) return null;
+    if (typeof resp === 'string') return resp;
+
+    // Массив блоков контента
+    if (Array.isArray(resp)) {
+        const texts = resp.filter(b => b?.type === 'text' && typeof b.text === 'string').map(b => b.text);
+        if (texts.length) return texts.join('\n');
+    }
+
+    // Anthropic/OpenAI формат
+    if (resp.content !== undefined && resp.content !== null) {
+        if (typeof resp.content === 'string') return resp.content;
+        if (Array.isArray(resp.content)) {
+            const texts = resp.content.filter(b => b?.type === 'text' && typeof b.text === 'string').map(b => b.text);
+            if (texts.length) return texts.join('\n');
+        }
+    }
+
+    // OpenAI choices формат
+    if (resp.choices?.[0]?.message?.content) {
+        const c = resp.choices[0].message.content;
+        if (typeof c === 'string') return c;
+        if (Array.isArray(c)) {
+            const texts = c.filter(b => b?.type === 'text' && typeof b.text === 'string').map(b => b.text);
+            if (texts.length) return texts.join('\n');
+        }
+    }
+
+    // Запасные варианты
+    if (typeof resp.text === 'string') return resp.text;
+    if (typeof resp.message === 'string') return resp.message;
+    if (resp.message?.content && typeof resp.message.content === 'string') return resp.message.content;
+
+    return null;
+}
+
+// Генерация через выбранный профиль (не меняет активные настройки таверны)
+async function generateViaBossProfile(systemPrompt, userPrompt, maxTokens) {
+    const profile = getBossProfile(apiSettings.stProfile);
+    if (!profile) throw new Error(`Профиль "${apiSettings.stProfile}" не найден`);
+
+    const ctx = SillyTavern.getContext();
+    if (!ctx.ConnectionManagerRequestService) {
+        throw new Error('Сервис запросов профиля недоступен');
+    }
+
+    const messages = [
+        { role: 'system', content: systemPrompt },
+        { role: 'user', content: userPrompt }
+    ];
+
+    try {
+        const response = await ctx.ConnectionManagerRequestService.sendRequest(
+            profile.id,
+            messages,
+            maxTokens,
+            {
+                stream: false,
+                extractData: true,
+                includePreset: false,    // не используем текущий пресет таверны
+                includeInstruct: false,  // не используем текущие инструкции
+            }
+        );
+
+        const text = extractBossResponse(response);
+        if (text == null) throw new Error('Неверный формат ответа');
+        return text.trim();
+    } catch (e) {
+        console.error('[ChibiBoss] ошибка генерации через профиль:', e);
+        throw e;
+    }
+}
+
+// Заполнить выпадашку профилей
+function populateBossProfiles() {
+    const select = document.getElementById('cb-boss-profile');
+    if (!select) return;
+
+    select.innerHTML = '<option value="">— выберите профиль —</option>';
+    try {
+        const ctx = SillyTavern.getContext();
+        const profiles = ctx.extensionSettings?.connectionManager?.profiles || [];
+        profiles.forEach(p => {
+            if (!p?.name) return;
+            const opt = document.createElement('option');
+            opt.value = p.name;
+            opt.textContent = p.name;
+            if (apiSettings.stProfile === p.name) opt.selected = true;
+            select.appendChild(opt);
+        });
+    } catch (e) {
+        console.warn('[ChibiBoss] ошибка загрузки профилей:', e);
+    }
+}
+
 
 // ----- СПИСОК МОДЕЛЕЙ -----
 // возвращает массив строк-id моделей
@@ -3823,7 +3983,7 @@ async function debugTestGenerate(type) {
 function wireApiSettingsEvents() {
     const modeEl    = document.getElementById('cb-api-mode');
     const customBox = document.getElementById('cb-api-settings-block');
-
+    const stBlock   = document.getElementById('cb-boss-profile-block');
 
     const urlEl     = document.getElementById('cb-api-url');
     const keyEl     = document.getElementById('cb-api-key');
@@ -3832,13 +3992,18 @@ function wireApiSettingsEvents() {
     const testEl    = document.getElementById('cb-api-test');
     const statusEl  = document.getElementById('cb-api-test-status');
 
-    // показать/спрятать блок «Свой API»
-    const toggleCustom = () => {
-    customBox.style.display = (modeEl.value === 'api') ? 'block' : 'none';
-};
+    const stSelect  = document.getElementById('cb-boss-profile');
+    const stRefresh = document.getElementById('cb-boss-profile-refresh');
 
 
-    // заполнить выпадашку моделей из сохранённого списка
+    // --- ЕДИНАЯ функция переключения режимов ---
+    const toggleModeBlocks = () => {
+        const mode = modeEl.value;
+        if (customBox) customBox.style.display = (mode === 'api') ? 'block' : 'none';
+        if (stBlock)   stBlock.style.display   = (mode === 'st')  ? 'block' : 'none';
+    };
+
+    // --- заполнить выпадашку моделей ---
     const fillModels = () => {
         modelEl.innerHTML = '';
         if (!apiSettings.models.length) {
@@ -3854,34 +4019,44 @@ function wireApiSettingsEvents() {
                 modelEl.appendChild(opt);
             });
         }
-        // вернуть ранее выбранную модель
         if (apiSettings.model) modelEl.value = apiSettings.model;
     };
 
-    // --- восстановить сохранённые значения при открытии ---
+    // --- восстановить сохранённые значения ---
     modeEl.value = apiSettings.mode;
     urlEl.value  = apiSettings.url || '';
     keyEl.value  = apiSettings.key || '';
     fillModels();
-    toggleCustom();
+    toggleModeBlocks();
+
+    // загрузить профили, если выбран режим профиля
+    if (apiSettings.mode === 'st') {
+        populateBossProfiles();
+    }
+
 
     // --- смена режима ---
     modeEl.addEventListener('change', () => {
         apiSettings.mode = modeEl.value;
         saveApiSettings();
-        toggleCustom();
+        toggleModeBlocks();
         statusEl.textContent = '';
         statusEl.className = 'cb-api-status';
+
+        // если переключились на профиль — загрузить список
+        if (apiSettings.mode === 'st') {
+            populateBossProfiles();
+        }
+
     });
 
     // --- ввод URL ---
     urlEl.addEventListener('input', () => {
         apiSettings.url = urlEl.value.trim();
-        apiSettings.resolvedModelsUrl = ''; // сбрасываем найденные адреса
+        apiSettings.resolvedModelsUrl = '';
         apiSettings.resolvedChatUrl = '';
         saveApiSettings();
     });
-
 
     // --- ввод ключа ---
     keyEl.addEventListener('input', () => {
@@ -3895,8 +4070,7 @@ function wireApiSettingsEvents() {
         saveApiSettings();
     });
 
-
-    // --- кнопка обновления списка моделей ---
+    // --- обновление списка моделей ---
     refreshEl.addEventListener('click', async () => {
         refreshEl.classList.add('spinning');
         statusEl.textContent = 'Загрузка моделей...';
@@ -3915,7 +4089,7 @@ function wireApiSettingsEvents() {
         }
     });
 
-    // --- кнопка теста соединения ---
+    // --- тест соединения ---
     testEl.addEventListener('click', async () => {
         testEl.disabled = true;
         statusEl.textContent = 'Проверка...';
@@ -3926,7 +4100,24 @@ function wireApiSettingsEvents() {
         statusEl.className = 'cb-api-status ' + (res.ok ? 'ok' : 'err');
         notify(res.message);
     });
-    // --- письма ---
+
+    // --- выбор профиля таверны ---
+    if (stSelect) {
+        stSelect.addEventListener('change', () => {
+            apiSettings.stProfile = stSelect.value;
+            saveApiSettings();
+        });
+    }
+
+    // --- обновление списка профилей ---
+    if (stRefresh) {
+        stRefresh.addEventListener('click', () => {
+            populateBossProfiles();
+        });
+    }
+
+
+    // --- галочка: письма ---
     const lettersChk = document.getElementById('cb-api-letters');
     if (lettersChk) {
         lettersChk.checked = apiSettings.lettersEnabled;
@@ -3936,7 +4127,7 @@ function wireApiSettingsEvents() {
         });
     }
 
-    // --- комментирование РП ---
+    // --- галочка: комментирование ---
     const commentChk = document.getElementById('cb-api-comment');
     if (commentChk) {
         commentChk.checked = apiSettings.commentEnabled;
@@ -3946,6 +4137,7 @@ function wireApiSettingsEvents() {
         });
     }
 
+    // --- выбор характера ---
     const persEl = document.getElementById('cb-api-personality');
     if (persEl) {
         persEl.value = apiSettings.personality;
@@ -3955,18 +4147,20 @@ function wireApiSettingsEvents() {
         });
     }
 
+    // --- глубина контекста ---
     const ctxEl = document.getElementById('cb-api-context');
     if (ctxEl) {
         ctxEl.value = apiSettings.contextDepth;
         ctxEl.addEventListener('change', () => {
             let v = parseInt(ctxEl.value, 10) || 4;
-            v = Math.max(1, Math.min(10, v));   // зажимаем 1..10
+            v = Math.max(1, Math.min(10, v));
             apiSettings.contextDepth = v;
             ctxEl.value = v;
             saveApiSettings();
         });
     }
-        // --- кнопки отладки генерации ---
+
+    // --- кнопки тестовой генерации ---
     const testLetterBtn  = document.getElementById('cb-api-test-letter');
     const testCommentBtn = document.getElementById('cb-api-test-comment');
 
@@ -3977,6 +4171,7 @@ function wireApiSettingsEvents() {
             testLetterBtn.disabled = false;
         });
     }
+
     if (testCommentBtn) {
         testCommentBtn.addEventListener('click', async () => {
             testCommentBtn.disabled = true;
@@ -3985,6 +4180,7 @@ function wireApiSettingsEvents() {
         });
     }
 }
+
 
 // HTML секции «Настройка API» (встраивается ВНУТРЬ панели Chibi Mafia Boss)
 function buildApiSettingsHTML() {
@@ -3996,12 +4192,10 @@ function buildApiSettingsHTML() {
             <label for="cb-api-mode">Подключение:</label>
 <select id="cb-api-mode" class="text_pole">
     <option value="off">Без подключения</option>
-    <option value="api">Подключить API</option>
+    <option value="api">Подключить свой API</option>
+    <option value="st">Использовать профиль таверны</option>
 </select>
 
-        </div>
-        <div class="chibiBoss-hint">
-            «Свой API» — для OpenAI-совместимых сервисов. Ключ хранится только в вашем браузере.
         </div>
 
         <div id="cb-api-settings-block" style="display:none;">
@@ -4015,6 +4209,7 @@ function buildApiSettingsHTML() {
                 <input type="password" id="cb-api-key" class="text_pole"
                        placeholder="sk-...">
             </div>
+
             <div class="chibiBoss-row">
                 <label for="cb-api-model">Модель:</label>
                 <select id="cb-api-model" class="text_pole" style="flex:1;">
@@ -4023,6 +4218,20 @@ function buildApiSettingsHTML() {
                 <button id="cb-api-refresh" class="cb-api-icon-btn" title="Обновить список моделей">⟳</button>
             </div>
         </div>
+        
+<div id="cb-boss-profile-block" style="display:none;">
+    <div class="chibiBoss-row">
+        <label for="cb-boss-profile">Профиль таверны:</label>
+        <select id="cb-boss-profile" class="text_pole" style="flex:1;">
+            <option value="">— выберите профиль —</option>
+        </select>
+        <button id="cb-boss-profile-refresh" class="cb-api-icon-btn" title="Обновить список">⟳</button>
+    </div>
+    <div class="chibiBoss-hint">
+        Генерация через выбранный профиль подключения.
+    </div>
+</div>
+
 
         <div class="chibiBoss-row" id="cb-api-test-row">
             <button id="cb-api-test" class="cb-api-test-btn">Тест соединения</button>
