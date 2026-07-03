@@ -48,23 +48,27 @@
     cursor: grab;
     user-select: none;
     -webkit-user-drag: none;
+    touch-action: none;          /* мобилка: палец не прокручивает страницу при перетаскивании */
     will-change: transform, left, top;
     z-index: 9999;               /* босс ПОВЕРХ стола (у стола 9998) */
 }
+
 
 #chibiBoss-actor.dragging {
     cursor: grabbing;
 }
 
 #chibiBoss-actor img {
-    width: 100%;
-    height: 100%;
+    width: 100% !important;      /* мобилка: не даём теме ST сбить размеры */
+    height: 100% !important;
+    object-fit: fill;            /* спрайт заполняет контейнер точно, без искажения пропорций */
     image-rendering: pixelated;  /* чёткий пиксель-арт */
     image-rendering: crisp-edges;
     display: block;
     pointer-events: none;
     -webkit-user-drag: none;
 }
+
 
 
 /* ----- блок настроек в панели Extensions ----- */
@@ -266,33 +270,36 @@
     letter-spacing: 0.5px;
 }
 
-/* ===== Кресло ===== */
 #chibiBoss-chair {
     position: absolute;
-    width: 106px;           
-    height: 130px;          
+    width: 106px;
+    height: 130px;
     transform-origin: 0 0;
     pointer-events: auto;
     cursor: grab;
     user-select: none;
     -webkit-user-drag: none;
+    touch-action: none;          /* мобилка: палец не прокручивает страницу */
     z-index: 9997;
     will-change: transform, left, top;
 }
+
 
 #chibiBoss-chair.dragging {
     cursor: grabbing;
 }
 
 #chibiBoss-chair .cb-chair-img {
-    width: 106px;          
-    height: 130px;          
+    width: 106px !important;
+    height: 130px !important;
+    object-fit: fill;
     image-rendering: pixelated;
     image-rendering: crisp-edges;
     display: block;
     pointer-events: none;
     -webkit-user-drag: none;
 }
+
 
 /* ===== Рабочий стол ===== */
 #chibiBoss-desk {
@@ -304,23 +311,27 @@
     cursor: grab;
     user-select: none;
     -webkit-user-drag: none;
+    touch-action: none;          /* мобилка: палец не прокручивает страницу */
     z-index: 9998;              /* чуть ниже босса (9999) */
     will-change: transform, left, top;
 }
+
 
 #chibiBoss-desk.dragging {
     cursor: grabbing;
 }
 
 #chibiBoss-desk .cb-desk-img {
-    width: 162px;
-    height: 162px;
+    width: 162px !important;
+    height: 162px !important;
+    object-fit: fill;
     image-rendering: pixelated;
     image-rendering: crisp-edges;
     display: block;
     pointer-events: none;
     -webkit-user-drag: none;
 }
+
 
 /* календарь на столе */
 #chibiBoss-desk .cb-calendar {
