@@ -2034,13 +2034,13 @@ goToWork(durationMs) {
 
 
         const center = getDeskCenter();
-        // учитываем текущий масштаб (на разных экранах/зумах scale ≠ 1)
-        const zoom = (window.devicePixelRatio || 1) / baseDPR;
-        const scale = 1 / zoom;
+        // учитываем текущий масштаб (на ПК — зум браузера, на мобилке = 1)
+        const scale = getScale();
         const half = 62 * scale;  // половина босса В ВИДИМЫХ пикселях
         const tx = center.x - half + WORK_OFFSET_X;
         const ty = center.y - half + WORK_OFFSET_Y;
         const c = clampToScreen(Math.round(tx), Math.round(ty));
+
 
         this.walkTo(c.x, c.y, () => {
             animator.play('work');
@@ -2091,12 +2091,12 @@ goToChair(durationMs) {
 
 
 const center = getChairCenter();
-const zoom = (window.devicePixelRatio || 1) / baseDPR;
-const scale = 1 / zoom;
+const scale = getScale();
 const half = 62 * scale;
 const tx = center.x - half + CHAIR_OFFSET_X;
 const ty = center.y - half + CHAIR_OFFSET_Y;
 const c = clampToScreen(Math.round(tx), Math.round(ty));
+
 
 // ← НОВОЕ: принудительно запускаем анимацию ходьбы к креслу
 const curX = parseFloat(actorEl.style.left) || 0;
@@ -2112,8 +2112,7 @@ this.walkTo(c.x, c.y, () => {
 
             // ПОТОМ пересчитываем позицию под новый размер (кресло 106×130)
             const center = getChairCenter();
-            const zoom = (window.devicePixelRatio || 1) / baseDPR;
-            const scale = 1 / zoom;
+            const scale = getScale();
             const halfW = 53 * scale;   // половина ШИРИНЫ 106px
             const halfH = 65 * scale;   // половина ВЫСОТЫ 130px
             const cx = center.x - halfW + CHAIR_OFFSET_X;
@@ -2121,6 +2120,7 @@ this.walkTo(c.x, c.y, () => {
             const corrected = clampToScreen(Math.round(cx), Math.round(cy), 106);
             actorEl.style.left = corrected.x + 'px';
             actorEl.style.top = corrected.y + 'px';
+
 
             // начинаем сидеть
             this.chairSitCycle(durationMs);
