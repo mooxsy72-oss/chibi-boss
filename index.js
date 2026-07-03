@@ -5506,15 +5506,16 @@ function buildLetterUserPrompt() {
 let letterGenerating = false;
 
 async function generateLetter(force = false) {
-    if (!apiIsConnected()) return;
-    if (!force && !apiSettings.lettersEnabled) return;
+    if (!apiIsConnected()) return false;
+    if (!force && !apiSettings.lettersEnabled) return false;
     if (letterGenerating) {
         console.warn('[ChibiBoss] генерация письма уже идёт — пропускаю повторный запуск');
-        return;
+        return false;
     }
 
     letterGenerating = true;
     console.log('[ChibiBoss] генерирую письмо...');
+    let created = false;
     try {
         const sys = await buildSystemPrompt('letter');
         const user = buildLetterUserPrompt();
@@ -5522,7 +5523,9 @@ async function generateLetter(force = false) {
         const parsed = parseLetterResponse(raw);
         if (parsed) {
             console.log('[ChibiBoss] письмо готово:', parsed.text.slice(0, 60));
-            addLetter(parsed.text, 'letter');  // ← всегда 'letter', не parsed.theme
+            addLetter(parsed.text, 'letter');
+            showLetterAlert();  // ← гарантированно показываем иконку
+            created = true;
         } else {
             console.warn('[ChibiBoss] письмо не сгенерировано (пустой/битый ответ).');
         }
@@ -5531,7 +5534,9 @@ async function generateLetter(force = false) {
     } finally {
         letterGenerating = false;
     }
+    return created;
 }
+
 
 // ---- планировщик писем: иногда босс пишет сам ----
 const LETTER_MIN_GAP_MS = 40 * 60 * 1000; // не чаще раза в 40 минут
@@ -6054,14 +6059,19 @@ function wireApiSettingsEvents() {
             testLetterBtn.disabled = true;
             showOut('var(--SmartThemeBodyColor,#ddd)', '⏳ Босс пишет письмо...');
             try {
-                await generateLetter(true);
-                showOut('#7ddc7d', '✅ Письмо доставлено. Смотри иконку-конверт над боссом.');
+                const ok = await generateLetter(true);
+                if (ok) {
+                    showOut('#7ddc7d', '✅ Письмо доставлено. Смотри иконку-конверт над боссом.');
+                } else {
+                    showOut('#ffc86b', '⚠️ Модель вернула пустой ответ. Попробуй ещё раз или проверь модель/промпт.');
+                }
             } catch (e) {
                 showOut('#ff7d7d', '❌ Ошибка: ' + e.message);
             }
             testLetterBtn.disabled = false;
         });
     }
+
 
     if (testCommentBtn) {
         testCommentBtn.addEventListener('click', async () => {
