@@ -2424,11 +2424,35 @@ let commentListener = null;
 // ------------------------------------------------------------
 let actorEl, animator;
 let baseDPR = 1;  // всегда нормализуем к 100% зума
+// ------------------------------------------------------------
+//  ОПРЕДЕЛЕНИЕ МОБИЛКИ + ХЕЛПЕРЫ РАЗМЕРОВ ЭКРАНА
+// ------------------------------------------------------------
+// один раз определяем: телефон/планшет это или ПК
+const IS_MOBILE =
+    /Android|webOS|iPhone|iPad|iPod|BlackBerry|IEMobile|Opera Mini/i.test(navigator.userAgent) ||
+    (('ontouchstart' in window) && window.matchMedia('(max-width: 900px)').matches);
+
+// реальная ширина/высота видимой области.
+// visualViewport на мобилке корректно учитывает клавиатуру и панели браузера.
+function viewportW() {
+    return Math.round((window.visualViewport && window.visualViewport.width) || window.innerWidth);
+}
+function viewportH() {
+    return Math.round((window.visualViewport && window.visualViewport.height) || window.innerHeight);
+}
+
+// текущий масштаб фигурок.
+// На ПК — компенсация зума браузера. На мобилке — всегда 1 (DPR там не зум!).
+function getScale() {
+    if (IS_MOBILE) return 1;
+    return 1 / ((window.devicePixelRatio || 1) / baseDPR);
+}
 
 
 function applyZoomCompensation() {
-    const zoom = (window.devicePixelRatio || 1) / baseDPR;
-    const scale = 1 / zoom;
+    // На мобилке scale = 1 (там devicePixelRatio — плотность экрана, а не зум).
+    // Именно из-за этого фигурки становились крошечными и уезжали.
+    const scale = getScale();
     if (actorEl) actorEl.style.transform = `scale(${scale})`;
     if (deskEl)  deskEl.style.transform  = `scale(${scale})`;
     if (chairEl) chairEl.style.transform = `scale(${scale})`;
@@ -2441,6 +2465,10 @@ function applyZoomCompensation() {
 
 
 function startZoomWatcher() {
+    // На мобилке слежку за DPR отключаем: поворот экрана и открытие
+    // клавиатуры меняют devicePixelRatio, из-за чего фигурки телепортировались.
+    if (IS_MOBILE) return;
+
     let lastDPR = window.devicePixelRatio || 1;
     let saveTimer = null;  // для debounce сохранения
 
@@ -2546,13 +2574,14 @@ function startZoomWatcher() {
 
 // ограничить координаты границами экрана (с учётом размера объекта)
 function clampToScreen(x, y, objectSize = 124) {
-    const maxX = window.innerWidth - objectSize;
-    const maxY = window.innerHeight - objectSize;
+    const maxX = viewportW() - objectSize;
+    const maxY = viewportH() - objectSize;
     return {
         x: Math.max(0, Math.min(x, maxX)),
         y: Math.max(0, Math.min(y, maxY)),
     };
 }
+
 
 function createBoss() {
     grabAudio = new Audio(EXT_PATH + 'sounds/grab.ogg');
