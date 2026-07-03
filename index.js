@@ -2582,6 +2582,47 @@ function clampToScreen(x, y, objectSize = 124) {
     };
 }
 
+// вернуть босса, стол и кресло внутрь видимой области экрана.
+// вызывается при загрузке и при изменении размера окна (поворот/клавиатура).
+function reclampAll() {
+    if (actorEl) {
+        // размер босса зависит от режима: в кресле контейнер уже
+        const size = actorEl.classList.contains('chair-mode') ? actorEl.offsetWidth : 124;
+        const bc = clampToScreen(
+            parseFloat(actorEl.style.left) || 0,
+            parseFloat(actorEl.style.top)  || 0,
+            size
+        );
+        actorEl.style.left = bc.x + 'px';
+        actorEl.style.top  = bc.y + 'px';
+        savePos(bc.x, bc.y);
+    }
+    if (deskEl) {
+        const dc = clampToScreen(
+            parseFloat(deskEl.style.left) || 0,
+            parseFloat(deskEl.style.top)  || 0,
+            162
+        );
+        deskEl.style.left = dc.x + 'px';
+        deskEl.style.top  = dc.y + 'px';
+        saveDeskPos(dc.x, dc.y);
+    }
+    if (chairEl) {
+        const cc = clampToScreen(
+            parseFloat(chairEl.style.left) || 0,
+            parseFloat(chairEl.style.top)  || 0,
+            130
+        );
+        chairEl.style.left = cc.x + 'px';
+        chairEl.style.top  = cc.y + 'px';
+        saveChairPos(cc.x, cc.y);
+    }
+
+    // подтянуть иконки и пузырёк за боссом
+    positionGiftAlert();
+    positionLetterAlert();
+    positionCommentBubble();
+}
 
 function createBoss() {
     grabAudio = new Audio(EXT_PATH + 'sounds/grab.ogg');
@@ -6492,7 +6533,23 @@ if (!settings.enabled) {
     if (behavior) behavior.pause();
 }
 
-console.log('[ChiboBoss] загружен. Путь:', EXT_PATH);
+    // вернуть всё в рамки экрана сразу после загрузки
+    // (несколько раз, т.к. на мобилке размеры окна «устаканиваются» не мгновенно)
+    reclampAll();
+    setTimeout(reclampAll, 300);
+    setTimeout(reclampAll, 1000);
+
+    // на мобилке следим за изменением видимой области:
+    // поворот экрана, открытие/закрытие клавиатуры, панели браузера
+    if (IS_MOBILE) {
+        const onViewportChange = () => reclampAll();
+        window.addEventListener('resize', onViewportChange);
+        window.addEventListener('orientationchange', () => setTimeout(reclampAll, 300));
+        if (window.visualViewport) {
+            window.visualViewport.addEventListener('resize', onViewportChange);
+        }
+    }
+
     console.log('[ChibiBoss] загружен. Путь:', EXT_PATH);
 }
 
