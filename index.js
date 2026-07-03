@@ -3555,14 +3555,19 @@ function setChairVisible(visible) {
                 cancelAnimationFrame(behavior.walkRaf);
                 behavior.walkRaf = null;
             }
-            chairLocked = false;
+
+            // ← НОВОЕ: корректно выходим из режима кресла
+            // (снимает класс chair-mode, возвращает размер 124×124
+            //  и перезагружает спрайт, чтобы не осталось растянутого кадра)
+            behavior.leaveChairMode();
+
             behavior.busy = false;
             behavior.lastAction = null;
-            animator.play('idle_front');
             behavior.scheduleNext();
         }
     }
 }
+
 
 // ------------------------------------------------------------
 //  БОРД СТАТИСТИКИ (по клику на календарь)
