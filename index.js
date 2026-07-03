@@ -34,9 +34,12 @@ function playCachedSound(audioObj) {
 //   WORK_OFFSET_X: + вправо / - влево
 //   WORK_OFFSET_Y: + вниз  / - вверх
 // ------------------------------------------------------------
+
 const WORK_OFFSET_X = 0;
 const WORK_OFFSET_Y = 0;
 
+const CHAIR_OFFSET_X = 0;
+const CHAIR_OFFSET_Y = 0;
 
 // ------------------------------------------------------------
 //  СИСТЕМЫ: стресс и привязанность
@@ -49,7 +52,8 @@ const AFFECTION_GAIN_PER_PET = 2;          // +2% за каждую секунд
 const STRESS_THRESHOLD_NORMAL = 40;        // выше 40% начинает нервничать
 const STRESS_THRESHOLD_HIGH = 70;          // выше 70% нервничает очень часто
 const STRESS_FROM_WORK_PER_MIN = 3;        // +3% стресса за минуту работы
-const STRESS_RELIEF_FROM_PET_PER_SEC = 1; // -1% стресса за секунду поглаживания
+const STRESS_RELIEF_FROM_PET_PER_SEC = 2; // -2% стресса за секунду поглаживания
+
 
 // Интервалы систем (мс)
 const SYSTEM_TICK_INTERVAL = 30000;        // проверка систем каждые 30 сек
@@ -79,22 +83,34 @@ const ANIMATIONS = {
     release_left:     { type: 'frames', count: 4, fps: 20, loop: false },
     release_right:    { type: 'frames', count: 4, fps: 20, loop: false },
 
-    smoke_start_right:{ type: 'frames', count: 14, fps: 9, loop: false },
+    smoke_start_right:{ type: 'frames', count: 14, fps: 7, loop: false },
     smoke_loop_right: { type: 'apng' },
-    smoke_start_left: { type: 'frames', count: 14, fps: 9, loop: false },
+    smoke_start_left: { type: 'frames', count: 14, fps: 7, loop: false },
     smoke_loop_left:  { type: 'apng' },
 
-    phone_start_right:{ type: 'frames', count: 27, fps: 9, loop: false },
+    phone_start_right:{ type: 'frames', count: 27, fps: 7, loop: false },
     phone_loop_right: { type: 'apng' },
-    phone_end_right:  { type: 'frames', count: 8, fps: 9, loop: false },
-    phone_start_left: { type: 'frames', count: 27, fps: 9, loop: false },
+    phone_end_right:  { type: 'frames', count: 8, fps: 7, loop: false },
+    phone_start_left: { type: 'frames', count: 27, fps: 7, loop: false },
     phone_loop_left:  { type: 'apng' },
-    phone_end_left:   { type: 'frames', count: 8, fps: 9, loop: false },
+    phone_end_left:   { type: 'frames', count: 8, fps: 7, loop: false },
 
     pet_loop:         { type: 'apng' },
     work:             { type: 'apng' },
     stress:           { type: 'apng' },
+
+    chair_sit:        { type: 'apng' },
+    chair_sip:        { type: 'frames', count: 9, fps: 7, loop: false },
+
+    // ← НОВЫЕ АНИМАЦИИ: падение и сидение
+    fall_right:       { type: 'frames', count: 8, fps: 7, loop: false },
+    fall_left:        { type: 'frames', count: 8, fps: 7, loop: false },
+    sit_right:        { type: 'apng' },
+    sit_left:         { type: 'apng' },
+    standup_right:    { type: 'frames', count: 2, fps: 10, loop: false },
+    standup_left:     { type: 'frames', count: 2, fps: 10, loop: false },
 };
+
 
 // ------------------------------------------------------------
 //  НАСТРОЙКИ
@@ -103,15 +119,17 @@ const SETTINGS_KEY = 'chibiBoss_settings';
 const POS_KEY      = 'chibiBoss_pos';
 
 const defaultSettings = {
-    enabled: true, 
+    enabled: true,
     name: 'Boss',
     tempo: 'normal',
     deskEnabled: true,
+    chairEnabled: true,      // ← ДОБАВЬ ЭТУ СТРОКУ
     affection: 60,
     stress: 20,
-    lastUpdate: Date.now(),     // метка последнего обновления систем
-    gameDifficulty: 'normal',   // easy | normal | hard — сложность ИИ в играх
+    lastUpdate: Date.now(),
+    gameDifficulty: 'normal',
 };
+
 
 
 
@@ -130,27 +148,55 @@ function loadSettings() {
 
 // обновить системы на основе прошедшего времени
 function updateSystems() {
+    if (!settings.enabled) return; // ← НОВАЯ СТРОКА: если персонаж выключен — ничего не делаем
+
     const now = Date.now();
-    const elapsed = now - (settings.lastUpdate || now);
+    let elapsed = now - (settings.lastUpdate || now);
+
+
+    // ЗАЩИТА: если прошло больше 2 минут — значит вкладка была неактивна.
+    // Не засчитываем это время (иначе онлайн/стрики накрутятся за время отсутствия).
+    const MAX_ELAPSED = 2 * 60 * 1000; // 2 минуты в миллисекундах
+    if (elapsed > MAX_ELAPSED) {
+        elapsed = SYSTEM_TICK_INTERVAL; // засчитываем только один обычный тик
+    }
+
     const hoursElapsed = elapsed / (1000 * 60 * 60);
 
     // падение привязанности со временем
     settings.affection = Math.max(0, settings.affection - AFFECTION_DECAY_PER_HOUR * hoursElapsed);
 
-    // рост стресса при низкой привязанности
-    if (settings.affection < 30) {
-        settings.stress = Math.min(100, settings.stress + hoursElapsed * 8); // быстрый рост
-    } else if (settings.affection < 50) {
-        settings.stress = Math.min(100, settings.stress + hoursElapsed * 4); // средний рост
-    } else {
-        // медленное снижение стресса при нормальной привязанности
-        settings.stress = Math.max(0, settings.stress - hoursElapsed * 2);
+    // рост стресса при низкой привязанности.
+    const bossWorking = behavior && behavior.busy && behavior.lastAction === 'work';
+    const bossResting = behavior && behavior.busy && behavior.lastAction === 'chair';
+
+    if (bossWorking) {
+        // стресс растёт постепенно, пока босс работает за столом
+        const workMinutes = elapsed / (1000 * 60);
+        settings.stress = Math.min(100, settings.stress + STRESS_FROM_WORK_PER_MIN * workMinutes);
+    } else if (!bossResting) {
+        // обычная логика (в кресле стресс снижают глотки, поэтому кресло пропускаем)
+        if (settings.affection < 30) {
+            settings.stress = Math.min(100, settings.stress + hoursElapsed * 8);
+        } else if (settings.affection < 50) {
+            settings.stress = Math.min(100, settings.stress + hoursElapsed * 4);
+        } else {
+            settings.stress = Math.max(0, settings.stress - hoursElapsed * 2);
+        }
     }
+
 
     settings.lastUpdate = now;
     saveSettings(settings);
 
-    // стрики и онлайн-время
+    // ПРОВЕРКА СМЕНЫ ДНЯ для workToday
+    const today = getTodayStr();
+    if (progress.workTodayDate !== today) {
+        progress.workToday = 0;
+        progress.workTodayDate = today;
+    }
+
+    // стрики и онлайн-время (уже с безопасным elapsed)
     updateStreaks(elapsed);
     progress.totalOnlineSeconds += elapsed / 1000;
     saveProgress();
@@ -158,14 +204,17 @@ function updateSystems() {
 }
 
 
+
+
+
 // тик систем каждые 30 сек
 function startSystemsLoop() {
-    updateSystems();
     setInterval(() => {
         updateSystems();
-        if (menuOpen) updateIndicators(); // обновить индикаторы в открытом меню
+        if (menuOpen) updateIndicators();
     }, SYSTEM_TICK_INTERVAL);
 }
+
 
 // поглаживание: +привязанность, -стресс
 let petTimer = null;
@@ -191,8 +240,9 @@ function applyWorkStress(durationMs) {
     saveSettings(settings);
 }
 // игры: снижают стресс (отвлекают босса)
-const STRESS_RELIEF_PER_MOVE = 1;   // -1% за каждый ход в игре
-const STRESS_RELIEF_PER_GAME = 5;   // -5% за завершённую партию
+const STRESS_RELIEF_PER_MOVE = 0.5; // -0.5% за каждый ход в игре
+const STRESS_RELIEF_PER_GAME = 3;   // -3% за завершённую партию
+
 
 function relieveStressFromGame(amount) {
     settings.stress = Math.max(0, settings.stress - amount);
@@ -297,20 +347,29 @@ const defaultApiSettings = {
     model: '',
     models: [],
 
-    // --- NEW: профиль ST ---
-    stProfile: '',              // ← ДОБАВЬ ЭТУ СТРОКУ
+    // --- профиль ST ---
+    stProfile: '',
 
     // --- комментирование РП ---
-    commentEnabled: false,  // босс комментирует ролевую
-    personality: 'calm',    // 'calm' | 'possessive' | 'obsessed'
-    contextDepth: 4,        // сколько последних сообщений РП брать в контекст
-    frequency: 8,           // комментировать раз в N сообщений (5..15)
-    maxTokens: 200,         // максимальная длина ответа
-    customPrompt: '',       // свой системный промпт (пусто = использовать наш дефолтный)
+    commentEnabled: false,       // босс комментирует ролевую
+    personality: 'calm',         // 'calm' | 'possessive' | 'obsessed'
+    contextDepth: 4,             // сколько последних сообщений РП брать в контекст
+    frequency: 8,                // комментировать раз в N сообщений
+    maxTokens: 200,              // максимальная длина ответа
+    customCommentPrompt: '',     // свой промпт для КОММЕНТАРИЕВ (пусто = из comments.md)
+    commentMemory: 3,            // сколько последних комментариев помнить
+
+    // --- контекст для комментариев ---
+    includePersona: false,               // учитывать описание персоны юзера
+    includeCharacterDescription: false,  // учитывать карточку бота
 
     // --- письма ---
-    lettersEnabled: false,  // босс генерирует письма (только при подключённом API)
+    lettersEnabled: false,       // босс генерирует письма
+    customLetterPrompt: '',      // свой промпт для ПИСЕМ (пусто = из letters.md)
+    letterMemory: 3,             // сколько последних писем помнить
 };
+
+
 
 function loadApiSettings() {
     try {
@@ -326,6 +385,42 @@ function saveApiSettings() {
 }
 
 let apiSettings = loadApiSettings();
+// ============================================================
+//  ЗАГРУЗКА ПРОМПТОВ ИЗ ФАЙЛОВ prompts/
+// ============================================================
+const PROMPTS_CACHE = {}; // сюда сохраняются загруженные промпты, чтобы не грузить каждый раз
+
+/**
+ * Загружает текст промпта.
+ * type = 'letter'  → берёт prompts/letters.md
+ * type = 'comment' → берёт prompts/comments.md
+ * Если пользователь задал свой промпт в настройках — используется он.
+ */
+async function loadPromptTemplate(type) {
+    // 1. Если задан свой промпт — используем его
+    const customKey = type === 'letter' ? 'customLetterPrompt' : 'customCommentPrompt';
+    if (apiSettings[customKey] && apiSettings[customKey].trim()) {
+        return apiSettings[customKey].trim();
+    }
+
+    // 2. Если уже загружали раньше — берём из кэша
+    if (PROMPTS_CACHE[type]) {
+        return PROMPTS_CACHE[type];
+    }
+
+    // 3. Загружаем из файла
+    const filename = type === 'letter' ? 'letters.md' : 'comments.md';
+    try {
+        const response = await fetch(`${EXT_PATH}prompts/${filename}?v=${Date.now()}`);
+        if (!response.ok) throw new Error('Не удалось загрузить файл');
+        const text = await response.text();
+        PROMPTS_CACHE[type] = text;
+        return text;
+    } catch (e) {
+        console.warn(`[ChibiBoss] не удалось загрузить промпт ${filename}:`, e);
+        return ''; // запасной пустой вариант
+    }
+}
 
 // ============================================================
 //  КОММЕНТИРОВАНИЕ РП
@@ -337,50 +432,297 @@ let commentTarget = 0;           // на каком счётчике срабо�
 let commentInProgress = false;   // идёт цикл комментирования
 let commentBubbleSticky = false; // пузырёк "залип" на долгое время
 
-// выбрать новый порог срабатывания вокруг настроенной частоты (±2 для живости)
+// выбрать порог срабатывания с лёгкой случайностью (±1 для живости)
 function rollCommentTarget() {
-    commentTarget = 4; // комментирует раз в 4 сообщения
+    const base = Math.max(2, apiSettings.frequency || 8);
+    const jitter = Math.floor(Math.random() * 3) - 1; // -1, 0 или +1
+    commentTarget = Math.max(2, base + jitter);
+}
+
+// описание характера босса (универсальное для комментариев и писем)
+function getPersonalityLine(type = 'comment') {
+    const lines = {
+        possessive: {
+            comment: 'You are POSSESSIVE. You watch the user\'s roleplay closely and get jealous when they grow close to anyone in it. Romance in their RP irritates you; danger to them alarms you.',
+            letter: 'You are POSSESSIVE: you watch over the user closely, you get visibly jealous, you dislike when they grow close to anyone else in their roleplay.'
+        },
+        obsessed: {
+            comment: 'You are OBSESSED. Your devotion is unhealthy and total. Any affection the user shows toward an RP character wounds you deeply; you fixate, you sulk, you cling.',
+            letter: 'You are OBSESSED: your devotion borders on unhealthy, you fixate on every detail about the user, jealousy and longing bleed into everything you write.'
+        },
+        calm: {
+            comment: 'You are CALM. Composed, dry-humored, hard to rattle. You comment with detached irony and only real danger to the user truly moves you.',
+            letter: 'You are CALM: composed and dry-humored, your affection shows through subtle remarks rather than open displays.'
+        }
+    };
+
+    const personality = apiSettings.personality || 'calm';
+    return lines[personality]?.[type] || lines.calm[type];
+}
+
+// ============================================================
+//  ID ТЕКУЩЕГО ЧАТА (для отдельной памяти на каждый чат)
+// ============================================================
+function getCurrentChatId() {
+    try {
+        const ctx = SillyTavern.getContext();
+
+        // Пробуем несколько способов получить ID чата
+        if (ctx.chatId) return String(ctx.chatId);
+        if (ctx.chat_metadata?.chat_id) return String(ctx.chat_metadata.chat_id);
+        if (ctx.sessionId) return String(ctx.sessionId);
+
+        // Групповой чат
+        if (ctx.groupId) return 'group_' + String(ctx.groupId);
+
+        // Одиночный чат — комбинируем имя персонажа + ID
+        if (ctx.characterId !== undefined) {
+            const char = ctx.characters?.[ctx.characterId];
+            const charName = char?.name || char?.avatar || ctx.name2 || '';
+            if (charName) return 'char_' + charName.replace(/\s+/g, '_');
+        }
+
+        return 'default';
+    } catch (e) {
+        console.warn('[ChibiBoss] ошибка getCurrentChatId:', e);
+        return 'default';
+    }
+}
+
+
+// ============================================================
+//  БЛОК ПАМЯТИ — ЧТО БОСС ГОВОРИЛ/ПИСАЛ В ПРОШЛЫЙ РАЗ
+// ============================================================
+
+function buildBossMemoryBlock(type = 'comment') {
+    const memorySize = type === 'letter'
+        ? (apiSettings.letterMemory ?? 3)
+        : (apiSettings.commentMemory ?? 3);
+
+    const n = Math.max(0, memorySize);
+    if (!n) return '';
+
+    let filtered;
+
+    if (type === 'letter') {
+        // Для писем — берём ВСЕ письма (без фильтра по чату)
+        filtered = lettersData.filter(l => l.type === 'letter');
+    } else {
+        // Для комментариев — фильтруем по текущему чату
+        const currentChat = getCurrentChatId();
+        filtered = lettersData.filter(l => l.type === 'comment' && l.chatId === currentChat);
+    }
+
+    console.log(`[ChibiBoss] buildBossMemoryBlock(${type}): найдено записей=${filtered.length}, нужно последних=${n}`);
+
+    const recent = filtered.slice(-n);
+    if (!recent.length) return '';
+
+    const lines = recent.map(l => `- "${l.text.replace(/\s+/g, ' ').trim()}"`).join('\n');
+    const label = type === 'comment'
+        ? 'Your recent remarks (do NOT repeat them, keep continuity, evolve the mood):'
+        : 'Your recent letters (do NOT repeat their content or phrasing, say something new):';
+
+    return `\n\n<your_recent_output>\n${label}\n${lines}\n</your_recent_output>`;
 }
 
 
 
 
+// ============================================================
+//  СИСТЕМНЫЙ ПРОМПТ (усиленный, с раскрытием персоны)
+// ============================================================
+async function buildSystemPrompt(type = 'comment') {
+    // Загружаем шаблон промпта (из файла или из своих настроек)
+    const template = await loadPromptTemplate(type);
+    if (!template) {
+        console.warn('[ChibiBoss] промпт пустой — использую запасной');
+        return type === 'comment'
+            ? 'You are a tiny mafia boss. Comment on the roleplay in one short line in Russian.'
+            : 'You are a tiny mafia boss. Write a short letter to the user in Russian.';
+    }
 
-// строка характера для влияния на тон комментария
-function commentPersonalityLine() {
-    switch (apiSettings.personality) {
-        case 'possessive':
-            return 'You are POSSESSIVE. You watch the user\'s roleplay closely and get jealous when they grow close to anyone in it. Romance in their RP irritates you; danger to them alarms you.';
-        case 'obsessed':
-            return 'You are OBSESSED. Your devotion is unhealthy and total. Any affection the user shows toward an RP character wounds you deeply; you fixate, you sulk, you cling.';
-        case 'calm':
-        default:
-            return 'You are CALM. Composed, dry-humored, hard to rattle. You comment with detached irony and only real danger to the user truly moves you.';
-    }
-}
-// собрать системный промпт комментария
-function buildCommentSystemPrompt() {
-    if (apiSettings.customPrompt && apiSettings.customPrompt.trim()) {
-        return apiSettings.customPrompt.trim();
-    }
     const name = settings.name || 'Boss';
-    return `You are ${name}, a chibi mafia boss trapped inside the user's desktop as a tiny digital pet. Once feared and powerful, now palm-sized and stuck on their screen. This humiliation does not soften you — you stay sharp, proud, elegantly dangerous. And you are still very much in love with the user.
+    const personalityLine = getPersonalityLine(type);
 
-${commentPersonalityLine()}
+    // Настроение по стрессу/привязанности (подставляется в {{mood_adjective}})
+    let moodAdj = 'neutral';
+    if (settings.stress > 70) moodAdj = 'tense, sharp';
+    else if (settings.stress > 40) moodAdj = 'irritable';
+    else if (settings.affection > 80) moodAdj = 'warm, possessive';
+    else if (settings.affection < 30) moodAdj = 'cold, distant';
 
-You secretly watch the roleplay the user is having with someone else on this screen. React to it OUT LOUD with one short remark, as if muttering over their shoulder.
+    let personaBlock = '';
+    let charBlock = '';
 
-Craft rules:
-- ONE short line. 1-2 sentences max. This is a spoken aside, not a letter.
-- Pick a clear mood and commit: irony, jealousy, sadness, possessiveness, dry comedy, reluctant tenderness.
-- React to what is actually happening in the RP — name the thing if it fits, don't be vague.
-- Stay in character: confident mafia charm, never whiny, never a greeting-card line.
-- Reference being trapped in the desktop only when it lands well.
+    try {
+        const ctx = SillyTavern.getContext();
 
-Language: natural fluent Russian, modern, witty. No English mixing.
+        // Персона: в письмах всегда, в комментариях — по галочке
+        if (type === 'letter' || apiSettings.includePersona) {
+            let personaText = resolveSTMacro(ctx, '{{user_persona}}');
 
-Reply with ONLY the spoken line. No quotes, no name, no formatting.`;
+            // Дополнительная попытка: прямой доступ к описанию персоны
+            if (!personaText || !personaText.trim()) {
+                try {
+                    const charId = ctx.characterId;
+                    if (ctx.characters && ctx.characters[charId]) {
+                        // это карточка бота, не персона — пропускаем
+                    }
+                    // Ищем персону через глобальные переменные ST
+                    if (typeof power_user !== 'undefined' && power_user.personas) {
+                        const key = power_user.default_persona || ctx.name1 || '';
+                        const val = power_user.personas[key];
+                        personaText = typeof val === 'string' ? val : val?.description || '';
+                    }
+                } catch(e2) {}
+            }
+
+            const personaName = ctx.name1 || 'User';
+            if (personaText && personaText.trim()) {
+                personaBlock = `<user_persona name="${personaName}">\n${personaText.trim()}\n</user_persona>`;
+                console.log('[ChibiBoss] Персона найдена:', personaText.slice(0, 80));
+            } else {
+                console.warn('[ChibiBoss] Персона НЕ найдена. name1:', ctx.name1);
+            }
+        }
+
+        // Карточка бота: только в комментариях и только по галочке
+        if (type === 'comment' && apiSettings.includeCharacterDescription) {
+            const charName = ctx.characterName || ctx.name2 || 'Character';
+            let charDesc = '';
+
+            if (ctx.characters && ctx.characterId !== undefined) {
+                const char = ctx.characters[ctx.characterId];
+                charDesc = char?.description || char?.data?.description || '';
+            }
+
+            if (charDesc && charDesc.trim()) {
+                charBlock = `<character name="${charName}">\n${charDesc.trim()}\n</character>`;
+                console.log('[ChibiBoss] Карточка бота найдена:', charDesc.slice(0, 80));
+            } else {
+                console.warn('[ChibiBoss] Карточка бота НЕ найдена. name2:', charName);
+            }
+        }
+    } catch (e) {
+        console.warn('[ChibiBoss] не удалось получить контекст ST для промпта:', e);
+    }
+
+
+    // Подставляем значения в шаблон вместо {{...}}
+    const result = template
+        .replace(/{{boss_name}}/g, name)
+        .replace(/{{personality_line}}/g, personalityLine)
+        .replace(/{{mood_adjective}}/g, moodAdj)
+        .replace(/{{persona_block}}/g, personaBlock)
+        .replace(/{{char_block}}/g, charBlock);
+
+    return result;
 }
+
+
+
+// ============================================================
+//  РАСКРЫТИЕ МАКРОСОВ SILLYTAVERN
+// ============================================================
+function resolveSTMacro(context, macro) {
+    // 1. Пробуем родной substituteParams
+    if (typeof context.substituteParams === 'function') {
+        try {
+            const resolved = context.substituteParams(macro);
+            if (resolved && resolved !== macro && resolved.trim()) return resolved;
+        } catch (e) {
+            console.warn('[ChibiBoss] substituteParams failed for', macro, e);
+        }
+    }
+
+    // 2. Фоллбэки
+    try {
+        if (macro === '{{user_persona}}' || macro === '{{persona}}') {
+            // Способ 1: через name1 и persona description (самый надёжный)
+            if (context.persona) return context.persona;
+
+            // Способ 2: через powerUser.personas
+            const pu = context.powerUser;
+            if (pu && pu.personas) {
+                const activeKey = pu.default_persona || context.name1 || '';
+                if (activeKey && pu.personas[activeKey]) {
+                    const desc = typeof pu.personas[activeKey] === 'string'
+                        ? pu.personas[activeKey]
+                        : pu.personas[activeKey]?.description;
+                    if (desc) return desc;
+                }
+                // Запасной: первая персона с описанием
+                for (const key of Object.keys(pu.personas)) {
+                    const val = pu.personas[key];
+                    const desc = typeof val === 'string' ? val : val?.description;
+                    if (desc && desc.trim()) return desc;
+                }
+            }
+
+            // Способ 3: через substituteParams с другим макросом
+            if (typeof context.substituteParams === 'function') {
+                for (const alt of ['{{persona}}', '{{user}}']) {
+                    try {
+                        const r = context.substituteParams(alt);
+                        if (r && r !== alt && r.trim()) return r;
+                    } catch(e) {}
+                }
+            }
+        }
+
+        if (macro === '{{authornote}}') {
+            const cm = context.chatMetadata;
+            if (cm) {
+                if (cm.note_to_self && typeof cm.note_to_self === 'object' && cm.note_to_self.note) {
+                    return cm.note_to_self.note;
+                }
+                if (cm.note_to_self && typeof cm.note_to_self === 'string' && cm.note_to_self.trim()) {
+                    return cm.note_to_self;
+                }
+                if (cm.authornote_prompt && typeof cm.authornote_prompt === 'string') {
+                    return cm.authornote_prompt;
+                }
+            }
+            const es = context.extensionSettings;
+            if (es?.note_to_self) {
+                if (typeof es.note_to_self === 'object') {
+                    return es.note_to_self.default_note || es.note_to_self.note || es.note_to_self.content || '';
+                }
+                if (typeof es.note_to_self === 'string') return es.note_to_self;
+            }
+            return '';
+        }
+    } catch (e) {
+        console.warn('[ChibiBoss] Fallback macro resolution failed for', macro, e);
+    }
+
+    return '';
+}
+
+
+// ============================================================
+//  ОЧИСТКА РП-СООБЩЕНИЙ ДЛЯ КОНТЕКСТА
+// ============================================================
+
+// Очистить одно сообщение РП перед вставкой в промпт
+function cleanRpMessage(text) {
+    if (!text) return '';
+    let s = cleanAiText(text);
+
+    // ← НОВОЕ: подставить макросы ST, чтобы модель не видела {{user}}/{{char}}
+    try {
+        const ctx = SillyTavern.getContext();
+        if (typeof ctx.substituteParams === 'function') {
+            s = ctx.substituteParams(s);
+        }
+    } catch (e) {
+        // Контекст недоступен — не критично, идём дальше
+    }
+
+    return s.trim();
+}
+
 
 // собрать пользовательскую часть (лог РП)
 function buildCommentUserPrompt() {
@@ -390,26 +732,75 @@ function buildCommentUserPrompt() {
         const depth = Math.max(1, apiSettings.contextDepth || 4);
         const recent = (ctx.chat || []).slice(-depth);
         log = recent
-            .map(m => `[${m.is_user ? 'User' : (m.name || 'Char')}]: ${m.mes}`)
+            .map(m => `[${m.is_user ? 'User' : (m.name || 'Char')}]: ${cleanRpMessage(m.mes)}`)
+            .filter(line => line.replace(/^\[[^\]]+\]:\s*/, '').trim())
             .join('\n\n');
     } catch (e) {
         log = '';
     }
-    if (!log) return 'The roleplay log is empty. Mutter something fitting about the quiet.';
-    return 'Here is the recent roleplay you are secretly watching:\n\n' + log +
-           '\n\nNow give your single spoken remark.';
+
+    const now = new Date();
+    const currentTime = now.toLocaleString('ru-RU', {
+        hour: '2-digit',
+        minute: '2-digit',
+        day: '2-digit',
+        month: '2-digit',
+        year: 'numeric'
+    });
+
+    if (!log) return `CURRENT TIME: ${currentTime}\n\nThe roleplay log is empty. Mutter something fitting about the quiet.` +
+                     buildBossMemoryBlock('comment');
+
+    const base = `CURRENT TIME: ${currentTime}\n\nHere is the recent roleplay you are secretly watching:\n\n` + log +
+                 '\n\nNow give your single spoken remark.';
+    return base + buildBossMemoryBlock('comment');
 }
 
-// очистить ответ модели от мусора
+
+// ============================================================
+//  УНИВЕРСАЛЬНАЯ ОЧИСТКА ТЕКСТА ОТ МУСОРА
+// ============================================================
+// Вырезает thinking/reasoning-теги, любой HTML, служебные обёртки,
+// markdown-заборы и лишние кавычки. Используется и для ответов ИИ,
+// и для чистки контекста РП перед отправкой в модель.
+function cleanAiText(raw) {
+    if (!raw) return '';
+    let s = String(raw);
+
+    // 1. Вырезать блоки размышлений вместе с содержимым
+    s = s.replace(/<(thinking|think|thought|reasoning|reason|antml:thinking)>[\s\S]*?<\/\1>/gi, '');
+
+    // 2. Вырезать любые одиночные/парные HTML/XML-теги (<doctrine html>, <p>, </div> и т.п.)
+    s = s.replace(/<\/?[a-z][^>]*>/gi, '');
+
+    // 3. Убрать markdown-заборы кода
+    s = s.replace(/```[a-z]*\s*/gi, '').replace(/```/g, '');
+
+    // 4. Срезать строки формата [Имя]: ... (если модель вернула диалог)
+    s = s.replace(/^\s*\[[^\]]+\]:\s*/gm, '');
+
+    // 5. Декодировать HTML-сущности (&quot; &amp; и т.д.)
+    const txt = document.createElement('textarea');
+    txt.innerHTML = s;
+    s = txt.value;
+
+    // 6. Убрать кавычки-обёртки по краям и лишние пробелы
+    s = s.replace(/^["'«»`\s]+/, '').replace(/["'«»`\s]+$/, '').trim();
+
+    return s;
+}
+
+// очистить ответ модели (комментарий)
 function cleanCommentResponse(raw) {
-    if (!raw) return null;
-    let s = String(raw).trim();
-    s = s.replace(/```[a-z]*\s*/gi, '').replace(/```/g, '').trim();
-    // срезать строки формата [Имя]: ... (если модель вернула диалог)
-    s = s.replace(/^\[[^\]]+\]:\s*/gm, '');
-    // убрать кавычки по краям
-    s = s.replace(/^["'«»]+/, '').replace(/["'«»]+$/, '').trim();
+    const s = cleanAiText(raw);
     return s || null;
+}
+
+// извлечь текст письма из ответа ИИ
+function parseLetterResponse(raw) {
+    const s = cleanAiText(raw);
+    if (!s) return null;
+    return { text: s };
 }
 
 
@@ -496,33 +887,22 @@ function positionCommentBubble() {
 
 
 // полный цикл: прерваться → идти к чату → спиной → генерить → пузырёк → вернуться
-async function runCommentCycle() {
-    if (!apiIsConnected() || !apiSettings.commentEnabled) return;
+async function runCommentCycle(force = false) {
+    if (!apiIsConnected()) return;
+    if (!force && !apiSettings.commentEnabled) return;
     if (commentInProgress) {
         console.warn('[ChibiBoss] комментарий уже идёт — пропускаю запуск');
         return;
     }
     commentInProgress = true;
 
-    const prevAction = behavior?.lastAction;
-    const wasIdle = !behavior?.busy;
+    let prevAction = null;
+    let wasIdle = true;
 
-    const restoreBehavior = () => {
-        commentInProgress = false;
-        if (!behavior) return;
-        behavior.busy = false;
-        if (!wasIdle && prevAction && prevAction !== 'pet') {
-            switch (prevAction) {
-                case 'smoke':  behavior.doSmoke();  break;
-                case 'phone':  behavior.doPhone();  break;
-                case 'stress': behavior.doStress(); break;
-                default:       behavior.resume();
-            }
-        } else {
-            behavior.resume();
-        }
-    };
-
+try {
+    prevAction = behavior?.lastAction;
+    wasIdle = !behavior?.busy;
+    if (behavior) behavior.leaveChairMode();
     if (behavior) {
         clearTimeout(behavior.timer);
         clearTimeout(behavior.holdTimer);
@@ -534,48 +914,83 @@ async function runCommentCycle() {
         behavior.paused = false;
     }
 
+    // ← НОВОЕ: ждём один кадр после leaveChairMode, чтобы браузер зафиксировал сброс
+    await new Promise(resolve => requestAnimationFrame(resolve));
+
     const target = getChatTargetPos();
+    // принудительно запускаем анимацию ходьбы ПЕРЕД walkTo
+    const curX = parseFloat(actorEl.style.left) || 0;
+    const curY = parseFloat(actorEl.style.top) || 0;
+    const dx = target.x - curX;
+    const dy = target.y - curY;
+    animator.play(walkAnimFor(dx, dy));
+
     await new Promise(resolve => behavior ? behavior.walkTo(target.x, target.y, resolve) : resolve());
 
-    animator.play('idle_back');
-    applyCommentMood();
 
-    // КЛЮЧЕВОЕ: даём SillyTavern завершить свою генерацию
-    await new Promise(r => setTimeout(r, 3000));
 
-    console.log('[ChibiBoss] запрашиваю комментарий у API...');
+        animator.play('idle_back');
+        applyCommentMood();
+
+        await new Promise(r => setTimeout(r, 3000));
+
+        console.log('[ChibiBoss] запрашиваю комментарий у API...');
     const raw = await apiGenerateWithRetry(
-        buildCommentSystemPrompt(),
+        await buildSystemPrompt('comment'),
         buildCommentUserPrompt(),
         150,
         2
     );
-    console.log('[ChibiBoss] RAW ОТВЕТ:', raw);
 
-    const text = cleanCommentResponse(raw);
 
-    if (!text) {
-        console.warn('[ChibiBoss] комментарий пустой — отмена (счётчик НЕ сбрасываем)');
-        restoreBehavior();
-        return;
+
+        console.log('[ChibiBoss] RAW ОТВЕТ:', raw);
+
+        const text = cleanCommentResponse(raw);
+
+        if (!text) {
+            console.warn('[ChibiBoss] комментарий пустой — отмена (счётчик НЕ сбрасываем)');
+            return;
+        }
+
+        commentMsgCount = 0;
+        rollCommentTarget();
+
+        console.log('[ChibiBoss] комментарий готов:', text.slice(0, 60));
+
+        showStickyCommentBubble(text, randomBetween(20000, 40000), () => {
+            addLetter(text, 'comment');
+        });
+
+    } catch (e) {
+        console.error('[ChibiBoss] ошибка цикла комментария:', e);
+} finally {
+    commentInProgress = false;
+
+    // ← НОВОЕ: сбрасываем кнопку тестирования комментария
+    const testCommentBtn = document.getElementById('cb-api-test-comment');
+    if (testCommentBtn) testCommentBtn.disabled = false;
+
+    if (!behavior) return;
+
+    behavior.busy = false;
+    if (!wasIdle && prevAction && prevAction !== 'pet') {
+        switch (prevAction) {
+            case 'smoke':  behavior.doSmoke();  break;
+            case 'phone':  behavior.doPhone();  break;
+            case 'stress': behavior.doStress(); break;
+            case 'work':   behavior.resume();   break;
+            case 'chair':  behavior.resume();   break;
+            default:       behavior.resume();
+        }
+    } else {
+        behavior.resume();
     }
-
-    commentMsgCount = 0;
-    rollCommentTarget();
-
-    console.log('[ChibiBoss] комментарий готов:', text.slice(0, 60));
-
-    showStickyCommentBubble(text, randomBetween(40000, 60000), () => {
-        addLetter(text, 'comment');
-        restoreBehavior();
-    });
 }
-
-
+}
 
 // слушатель сообщений ST
 function initCommentListener() {
-    // берём eventSource и типы событий из контекста ST (надёжный способ)
     let es = null;
     let evt = null;
 
@@ -584,35 +999,81 @@ function initCommentListener() {
         es  = ctx.eventSource || (typeof eventSource !== 'undefined' ? eventSource : null);
         evt = ctx.eventTypes || ctx.event_types || (typeof event_types !== 'undefined' ? event_types : null);
     } catch (e) {
-        // если getContext недоступен — пробуем глобальные переменные
         es  = (typeof eventSource !== 'undefined') ? eventSource : null;
         evt = (typeof event_types !== 'undefined') ? event_types : null;
     }
 
-    if (!es || !evt) {
+    if (!es) {
         console.warn('[ChibiBoss] eventSource не найден — комментирование недоступно.');
         return;
     }
 
-    rollCommentTarget();
+    // ОТПИСЫВАЕМСЯ ОТ СТАРОГО СЛУШАТЕЛЯ (если был)
+    if (commentListener && evt) {
+        const eventNames = [
+            'MESSAGE_RECEIVED',
+            'message_received',
+            'CHARACTER_MESSAGE_RENDERED',
+            'character_message_rendered',
+        ];
+        for (const name of eventNames) {
+            const eventKey = evt[name];
+            if (eventKey) {
+                try {
+                    es.off(eventKey, commentListener);
+                } catch (e) {
+                    // игнорируем ошибку отписки
+                }
+            }
+        }
+    }
 
-    // реагируем ТОЛЬКО на ответ ИИ (одно сообщение = один тик счётчика)
+    rollCommentTarget();
+    console.log('[ChibiBoss] стартовая цель комментария:', commentTarget);
+
+    // реагируем на ответ ИИ
     const onNewMessage = () => {
+        if (!settings.enabled) return; // ← НОВАЯ СТРОКА: проверка включен ли персонаж
         if (!apiSettings.commentEnabled || !apiIsConnected()) return;
-        if (commentInProgress) return;  // во время цикла не считаем
+        if (commentInProgress) return;
         commentMsgCount++;
         console.log('[ChibiBoss] сообщение №', commentMsgCount, 'из', commentTarget);
         if (commentMsgCount >= commentTarget) {
-            runCommentCycle();  // счётчик и target сбросятся внутри
+            console.log('[ChibiBoss] ▶ запускаю комментарий');
+            runCommentCycle();
         }
     };
 
-    if (evt.MESSAGE_RECEIVED) {
-        es.on(evt.MESSAGE_RECEIVED, onNewMessage);
+    // СОХРАНЯЕМ ССЫЛКУ НА СЛУШАТЕЛЬ
+    commentListener = onNewMessage;
+
+    // пробуем все возможные названия события
+    const eventNames = [
+        'MESSAGE_RECEIVED',
+        'message_received',
+        'CHARACTER_MESSAGE_RENDERED',
+        'character_message_rendered',
+    ];
+
+    let subscribed = false;
+    for (const name of eventNames) {
+        const eventKey = evt?.[name];
+        if (eventKey) {
+            console.log('[ChibiBoss] подписка на событие:', name, '→', eventKey);
+            es.on(eventKey, commentListener);
+            subscribed = true;
+            break;
+        }
     }
 
-    console.log('[ChibiBoss] слушатель комментариев подключён.');
+    if (!subscribed) {
+        console.warn('[ChibiBoss] не удалось найти событие нового сообщения. Доступные события:', evt);
+        console.warn('[ChibiBoss] комментирование работать НЕ будет.');
+    } else {
+        console.log('[ChibiBoss] слушатель комментариев подключён.');
+    }
 }
+
 
 // удобный флаг: есть ли рабочее подключение
 function apiIsConnected() {
@@ -846,13 +1307,12 @@ async function apiGenerate(systemPrompt, userPrompt, maxTokens = 200) {
             const text = extractApiText(rawBody);
 
             if (!text || !String(text).trim()) {
+                // Сервер ответил 200 OK, но текст пустой (например, поток
+                // оборвался). НЕ забываем рабочий адрес — он может быть верным.
                 console.warn('[ChibiBoss] пустой ответ от', chatUrl, rawBody.slice(0, 200));
-                if (chatUrl === apiSettings.resolvedChatUrl) {
-                    apiSettings.resolvedChatUrl = '';
-                    saveApiSettings();
-                }
                 continue;
             }
+
 
             // успех — запоминаем рабочий адрес
             apiSettings.resolvedChatUrl = chatUrl;
@@ -1061,6 +1521,8 @@ const defaultProgress = {
     tttWinsHard: 0,         // победы в кр-нолики на сложном
     checkersWins: 0,        // победы в шашки
     checkersWinsHard: 0,    // победы в шашки на сложном
+    chessWins: 0,           // победы в шахматы
+    chessWinsHard: 0,       // победы в шахматы на сложном
     totalGames: 0,          // всего сыграно партий
     totalWins: 0,           // всего побед
     stressCatch: 0,         // поймал стресс-анимацию (клик во время stress)
@@ -1247,7 +1709,12 @@ function preloadAll() {
         'walk_left', 'walk_right', 'walk_up', 'walk_down',
         'grab_left', 'grab_right', 'dragging_left', 'dragging_right',
         'release_left', 'release_right',
+        'chair_sit', 'chair_sip',
+        'fall_left', 'fall_right',          // ← НОВОЕ: падение
+        'sit_left', 'sit_right',            // ← НОВОЕ: сидение
+        'standup_left', 'standup_right',    // ← НОВОЕ: вставание
     ];
+
 
     priority.forEach(name => {
         const cfg = ANIMATIONS[name];
@@ -1263,6 +1730,7 @@ function preloadAll() {
         }
     });
 }
+
 
 // ------------------------------------------------------------
 //  ПОВЕДЕНИЕ БОССА
@@ -1331,43 +1799,51 @@ scheduleNext() {
     }, randomBetween(min, max));
 }
 
-    pickAction() {
-        if (this.paused || this.menuFrozen || this.busy) return;
-        let action = this.rollAction();
-        if (action === this.lastAction) {
-            action = this.rollAction();
-        }
-        switch (action) {
-            case 'walk':     this.doWalk();     break;
-            case 'pose':     this.doIdlePose(); break;
-            case 'smoke':    this.doSmoke();    break;
-            case 'phone':    this.doPhone();    break;
-            case 'stress':   this.doStress();   break;
-            case 'autowork': this.doAutoWork(); break;
-        }
-
+pickAction() {
+    if (this.paused || this.menuFrozen || this.busy) return;
+    let action = this.rollAction();
+    if (action === this.lastAction) {
+        action = this.rollAction();
     }
+    switch (action) {
+        case 'walk':     this.doWalk();     break;
+        case 'pose':     this.doIdlePose(); break;
+        case 'smoke':    this.doSmoke();    break;
+        case 'phone':    this.doPhone();    break;
+        case 'stress':   this.doStress();   break;
+        case 'autowork': this.doAutoWork(); break;
+        case 'autochair': this.doAutoChair(); break;
+        case 'fall':     this.doFall();     break;  // ← НОВОЕ
+    }
+}
+
 
 
 rollAction() {
     const r = Math.random();
 
     // Стресс-анимация при высоком стрессе
-    if (settings.stress > 90 && r < 0.60) return 'stress';       // 60%
-    if (settings.stress > STRESS_THRESHOLD_HIGH && r < 0.45) return 'stress';  // 45%
-    if (settings.stress > STRESS_THRESHOLD_NORMAL && r < 0.25) return 'stress'; // 25%
+    if (settings.stress > 90 && r < 0.60) return 'stress';
+    if (settings.stress > STRESS_THRESHOLD_HIGH && r < 0.45) return 'stress';
+    if (settings.stress > STRESS_THRESHOLD_NORMAL && r < 0.25) return 'stress';
 
     // Автоматическая работа (если стол включён)
     const deskAvailable = settings.deskEnabled && deskEl && deskEl.style.display !== 'none';
-    if (deskAvailable && r < 0.20) return 'autowork';  // 20% (было 12%)
+    if (deskAvailable && r < 0.08) return 'autowork';  // 8%
 
-    // Остальные действия
-    if (r < 0.45) return 'walk';   // 45% (было 58%)
-    if (r < 0.60) return 'pose';   // 15%
-    if (r < 0.78) return 'smoke';  // 18%
-    return 'phone';                 // 22%
+    // Автоматическое кресло (если включено) — чаще, чем работа
+    const chairAvailable = settings.chairEnabled && chairEl && chairEl.style.display !== 'none';
+    if (chairAvailable && r < 0.18) return 'autochair';  // 10%
+
+    // ← НОВОЕ: падение (5% шанс)
+    if (r < 0.23) return 'fall';  // 5%
+
+    // Остальные действия — упор на ходьбу
+    if (r < 0.63) return 'walk';   // ~40%
+    if (r < 0.73) return 'pose';   // 10%
+    if (r < 0.86) return 'smoke';  // 13%
+    return 'phone';                 // 14%
 }
-
 
 
     doIdlePose() {
@@ -1435,6 +1911,11 @@ rollAction() {
             actorEl.style.left = Math.round(nx) + 'px';
             actorEl.style.top = Math.round(ny) + 'px';
 
+            // обновить позиции иконок во время ходьбы
+            positionGiftAlert();
+            positionLetterAlert();
+            positionCommentBubble();
+
             this.walkRaf = requestAnimationFrame(step);
         };
         this.walkRaf = requestAnimationFrame(step);
@@ -1498,16 +1979,17 @@ rollAction() {
         this.scheduleNext();
     }
 
-    freezeForMenu() {
-        this.menuFrozen = true;
-        clearTimeout(this.timer);
-        if (this.walkRaf) {
-            cancelAnimationFrame(this.walkRaf);
-            this.walkRaf = null;
-            this.busy = false;
-            animator.play('idle_front');
-        }
+freezeForMenu() {
+    this.menuFrozen = true;
+    clearTimeout(this.timer);
+    if (this.walkRaf) {
+        if (commentInProgress) return;
+        cancelAnimationFrame(this.walkRaf);
+        this.walkRaf = null;
+        this.busy = false;
+        animator.play('idle_front');
     }
+}
 
     unfreezeFromMenu() {
         this.menuFrozen = false;
@@ -1532,7 +2014,7 @@ rollAction() {
         this.scheduleNext();
     }
 
-    // отправить работать: идёт к центру стола → анимация work → встаёт
+    // отправить работать: идёт к центру стола → анимация work → встаёт → отходит
 goToWork(durationMs) {
     if (!deskEl || deskEl.style.display === 'none') return;
 
@@ -1545,30 +2027,199 @@ goToWork(durationMs) {
         this.walkRaf = null;
     }
 
-    deskLocked = true;  // заблокировали стол
+    // Если чибик сидел в кресле — выходим
+    this.leaveChairMode();
 
-    const center = getDeskCenter();
-    // учитываем текущий масштаб (на разных экранах/зумах scale ≠ 1)
-    const zoom = (window.devicePixelRatio || 1) / baseDPR;
-    const scale = 1 / zoom;
-    const half = 62 * scale;  // половина босса В ВИДИМЫХ пикселях
-    const tx = center.x - half + WORK_OFFSET_X;
-    const ty = center.y - half + WORK_OFFSET_Y;
-    const c = clampToScreen(Math.round(tx), Math.round(ty));
+    deskLocked = true;
 
-deskLocked = true;
 
-    this.walkTo(c.x, c.y, () => {
-        animator.play('work');
+        const center = getDeskCenter();
+        // учитываем текущий масштаб (на разных экранах/зумах scale ≠ 1)
+        const zoom = (window.devicePixelRatio || 1) / baseDPR;
+        const scale = 1 / zoom;
+        const half = 62 * scale;  // половина босса В ВИДИМЫХ пикселях
+        const tx = center.x - half + WORK_OFFSET_X;
+        const ty = center.y - half + WORK_OFFSET_Y;
+        const c = clampToScreen(Math.round(tx), Math.round(ty));
+
+        this.walkTo(c.x, c.y, () => {
+            animator.play('work');
+            this.holdTimer = setTimeout(() => {
+                deskLocked = false;  // разблокировали стол
+
+                // ОТХОДИМ от стола в случайную сторону, чтобы не «стоять на столе»
+                const curX = parseFloat(actorEl.style.left) || 0;
+                const curY = parseFloat(actorEl.style.top) || 0;
+                const dist = randomBetween(150, 260);           // как далеко отойти
+                const angle = randomBetween(0, Math.PI * 2);    // случайное направление
+                const away = clampToScreen(
+                    Math.round(curX + Math.cos(angle) * dist),
+                    Math.round(curY + Math.sin(angle) * dist)
+                );
+
+                this.walkTo(away.x, away.y, () => {
+                    animator.play('idle_front');
+                    this.busy = false;
+                    this.scheduleNext();
+                });
+            }, durationMs);
+        });
+    }
+
+
+    // отправить в кресло: идёт к креслу → анимация сидения с глотками → встаёт → отходит
+goToChair(durationMs) {
+    if (!chairEl || chairEl.style.display === 'none') return;
+
+    this.busy = true;
+    this.lastAction = 'chair';
+    clearTimeout(this.timer);
+    clearTimeout(this.holdTimer);
+    if (this.walkRaf) {
+        cancelAnimationFrame(this.walkRaf);
+        this.walkRaf = null;
+    }
+
+    // ← НОВОЕ: принудительно останавливаем режим преследования курсора
+    if (this.followRaf) {
+        cancelAnimationFrame(this.followRaf);
+        this.followRaf = null;
+        this.followAnim = null;
+    }
+
+    chairLocked = true;
+
+
+const center = getChairCenter();
+const zoom = (window.devicePixelRatio || 1) / baseDPR;
+const scale = 1 / zoom;
+const half = 62 * scale;
+const tx = center.x - half + CHAIR_OFFSET_X;
+const ty = center.y - half + CHAIR_OFFSET_Y;
+const c = clampToScreen(Math.round(tx), Math.round(ty));
+
+// ← НОВОЕ: принудительно запускаем анимацию ходьбы к креслу
+const curX = parseFloat(actorEl.style.left) || 0;
+const curY = parseFloat(actorEl.style.top) || 0;
+const dx = c.x - curX;
+const dy = c.y - curY;
+animator.play(walkAnimFor(dx, dy));
+
+this.walkTo(c.x, c.y, () => {
+
+            // СНАЧАЛА меняем размер
+            actorEl.classList.add('chair-mode');
+
+            // ПОТОМ пересчитываем позицию под новый размер (кресло 106×130)
+            const center = getChairCenter();
+            const zoom = (window.devicePixelRatio || 1) / baseDPR;
+            const scale = 1 / zoom;
+            const halfW = 53 * scale;   // половина ШИРИНЫ 106px
+            const halfH = 65 * scale;   // половина ВЫСОТЫ 130px
+            const cx = center.x - halfW + CHAIR_OFFSET_X;
+            const cy = center.y - halfH + CHAIR_OFFSET_Y;
+            const corrected = clampToScreen(Math.round(cx), Math.round(cy), 106);
+            actorEl.style.left = corrected.x + 'px';
+            actorEl.style.top = corrected.y + 'px';
+
+            // начинаем сидеть
+            this.chairSitCycle(durationMs);
+        });
+
+    }
+
+    // цикл сидения: 70% времени сидит спокойно, 30% делает глоток
+    chairSitCycle(remainingMs) {
+        if (this.paused || this.lastAction !== 'chair') return;
+
+        animator.play('chair_sit');
+
+        // случайный интервал сидения (70% времени)
+        const sitDuration = randomBetween(3000, 8000);
+
         this.holdTimer = setTimeout(() => {
-            applyWorkStress(durationMs);
-            animator.play('idle_front');
-            deskLocked = false;  // разблокировали стол
-            this.busy = false;
-            this.scheduleNext();
-        }, durationMs);
+            // проверяем, осталось ли время
+            const nextRemaining = remainingMs - sitDuration;
+            if (nextRemaining <= 0) {
+                // время вышло — встаём и отходим
+                this.finishChair();
+                return;
+            }
+
+            // делаем глоток: покадровая анимация chair_sip
+            animator.play('chair_sip', () => {
+                // коллбэк: анимация глотка закончилась
+
+                // снизить стресс за каждый глоток
+                settings.stress = Math.max(0, settings.stress - 1);
+                saveSettings(settings);
+
+                // сколько времени заняла анимация глотка (9 кадров / 8 fps ≈ 1125ms)
+                const sipDuration = (1000 / 8) * 9;
+
+                // продолжаем цикл
+                const afterSip = nextRemaining - sipDuration;
+                if (afterSip <= 0) {
+                    this.finishChair();
+                } else {
+                    this.chairSitCycle(afterSip);
+                }
+            });
+
+        }, sitDuration);
+    }
+
+// Корректный выход из режима кресла:
+// снимает класс, возвращает размер 124×124 и ПЕРЕЗАГРУЖАЕТ спрайт,
+// чтобы браузер не оставил старый кадр кресла растянутым.
+leaveChairMode() {
+    if (!actorEl.classList.contains('chair-mode')) return;
+
+    // Принудительный сброс: очищаем src перед сменой размера
+    const img = actorEl.querySelector('img');
+    const tempSrc = img.src;
+    img.src = '';  // ← пустой src сбрасывает кэш браузера
+
+    // Снимаем класс (меняем размер контейнера)
+    actorEl.classList.remove('chair-mode');
+    chairLocked = false;
+    clearTimeout(behavior?.holdTimer);
+
+    // Останавливаем аниматор и восстанавливаем src
+    animator.stop();
+    animator.current = null;
+
+    // Ждём один кадр (чтобы браузер зафиксировал пустой src), потом загружаем idle
+    requestAnimationFrame(() => {
+        animator.play('idle_front');
     });
 }
+
+
+finishChair() {
+    // корректно выходим из кресла (размер + спрайт)
+    this.leaveChairMode();
+
+    const curX = parseFloat(actorEl.style.left) || 0;
+    const curY = parseFloat(actorEl.style.top) || 0;
+    const dist = randomBetween(150, 260);
+    const angle = randomBetween(0, Math.PI * 2);
+    const away = clampToScreen(
+        Math.round(curX + Math.cos(angle) * dist),
+        Math.round(curY + Math.sin(angle) * dist)
+    );
+
+    // ждём один кадр, чтобы спрайт 124×124 успел отрисоваться, потом идём
+    requestAnimationFrame(() => {
+        this.walkTo(away.x, away.y, () => {
+            animator.play('idle_front');
+            this.busy = false;
+            this.scheduleNext();
+        });
+    });
+}
+
+
 
 
 
@@ -1595,31 +2246,109 @@ deskLocked = true;
         });
     }
 
+// падает и сидит на полу
+doFall() {
+    this.busy = true;
+    this.lastAction = 'fall';
 
-    // сам решает поработать — короткая сессия 1–3 минуты
+    // Выбираем случайную сторону (право или лево)
+    const side = Math.random() < 0.5 ? 'left' : 'right';
+
+    // Время сидения зависит от темпа
+    const [hMin, hMax] = this.holdRange();
+
+    // 1. Анимация падения (8 кадров, 7 fps)
+    animator.play('fall_' + side, () => {
+        if (this.paused) return;
+
+        // 2. Анимация сидения на полу (зацикленная apng)
+        animator.play('sit_' + side);
+
+        // 3. Сидим заданное время
+        this.hold(randomBetween(hMin, hMax), () => {
+            // 4. Анимация вставания (2 кадра, 10 fps)
+            animator.play('standup_' + side, () => {
+                // 5. Возвращаемся в idle с той же стороны
+                const idleAnim = side === 'left' ? 'idle_half_left' : 'idle_half_right';
+                animator.play(idleAnim);
+                this.busy = false;
+                this.scheduleNext();
+            });
+        });
+    });
+}
+
     doAutoWork() {
         if (!deskEl || deskEl.style.display === 'none') {
-            this.doWalk(); // если стола нет — просто гуляет
+            this.doWalk();
             return;
         }
-        const dur = randomBetween(60000, 180000);
+
+        // тайминги работы зависят от темпа
+        let minMs, maxMs;
+        switch (settings.tempo) {
+            case 'high':
+                minMs = 2 * 60 * 1000;   // 2 минуты
+                maxMs = 2 * 60 * 1000;
+                break;
+            case 'low':
+                minMs = 7 * 60 * 1000;   // 7 минут
+                maxMs = 7 * 60 * 1000;
+                break;
+            case 'normal':
+            default:
+                minMs = 4 * 60 * 1000;   // 4 минуты
+                maxMs = 4 * 60 * 1000;
+        }
+
+        const dur = randomBetween(minMs, maxMs);
         progress.autoWorkCount++; saveProgress();
         this.goToWork(dur);
+    }
+
+    // сам решает посидеть в кресле
+    doAutoChair() {
+        if (!chairEl || chairEl.style.display === 'none') {
+            this.doWalk();
+            return;
+        }
+
+        // тайминги сидения зависят от темпа
+        let minMs, maxMs;
+        switch (settings.tempo) {
+            case 'high':
+                minMs = 2 * 60 * 1000;   // 2 минуты
+                maxMs = 2 * 60 * 1000;
+                break;
+            case 'low':
+                minMs = 7 * 60 * 1000;   // 7 минут
+                maxMs = 7 * 60 * 1000;
+                break;
+            case 'normal':
+            default:
+                minMs = 4 * 60 * 1000;   // 4 минуты
+                maxMs = 4 * 60 * 1000;
+        }
+
+        const dur = randomBetween(minMs, maxMs);
+        this.goToChair(dur);
     }
 
     // следование за курсором при очень высоком стрессе
     setupStressFollow() {
         this.followRaf = null;
         this.followLastTime = 0;
-        this.followAnim = null;   // какая анимация ходьбы сейчас играет
+        this.followAnim = null;
 
         document.addEventListener('pointermove', (e) => {
+            // выключенный персонаж не реагирует на мышь
+            if (!settings.enabled) return;
             if (settings.stress < 80 || this.busy || this.paused || this.menuFrozen
                 || commentInProgress || commentBubbleActive) return;
-            this.followTarget.x = e.clientX - 62; // центрируем на боссе
+
+            this.followTarget.x = e.clientX - 62;
             this.followTarget.y = e.clientY - 62;
 
-            // запускаем цикл следования, если он ещё не идёт
             if (!this.followRaf) {
                 this.followLastTime = performance.now();
                 this.followAnim = null;
@@ -1628,10 +2357,11 @@ deskLocked = true;
         });
     }
 
+
     // один кадр преследования курсора
     _followStep(now) {
         // условия выхода из режима следования
-        if (settings.stress < 80 || this.busy || this.paused || this.menuFrozen
+        if (!settings.enabled || settings.stress < 80 || this.busy || this.paused || this.menuFrozen
             || commentInProgress || commentBubbleActive) {
             this.followRaf = null;
             this.followAnim = null;
@@ -1675,6 +2405,10 @@ deskLocked = true;
         actorEl.style.left = Math.round(c.x) + 'px';
         actorEl.style.top = Math.round(c.y) + 'px';
 
+        positionGiftAlert();
+        positionLetterAlert();
+        positionCommentBubble();
+
         this.followRaf = requestAnimationFrame(this._followStep.bind(this));
     }
 }
@@ -1682,6 +2416,7 @@ deskLocked = true;
 let behavior = null;
 let grabAudio = null;
 let releaseAudio = null;
+let commentListener = null;  
 
 
 // ------------------------------------------------------------
@@ -1696,12 +2431,18 @@ function applyZoomCompensation() {
     const scale = 1 / zoom;
     if (actorEl) actorEl.style.transform = `scale(${scale})`;
     if (deskEl)  deskEl.style.transform  = `scale(${scale})`;
+    if (chairEl) chairEl.style.transform = `scale(${scale})`;
+
+    // иконки и пузырёк должны следовать за боссом после смены масштаба
+    positionGiftAlert();
+    positionLetterAlert();
+    positionCommentBubble();
 }
 
-// надёжный наблюдатель за зумом: ловит ЛЮБОЕ изменение масштаба,
-// даже если событие resize не сработало
+
 function startZoomWatcher() {
     let lastDPR = window.devicePixelRatio || 1;
+    let saveTimer = null;  // для debounce сохранения
 
     const check = () => {
         const now = window.devicePixelRatio || 1;
@@ -1726,7 +2467,22 @@ function startZoomWatcher() {
                 );
                 actorEl.style.left = c.x + 'px';
                 actorEl.style.top  = c.y + 'px';
+            } else if (behavior && behavior.busy &&
+                       behavior.lastAction === 'chair' &&
+                       (animator.current === 'chair_sit' || animator.current === 'chair_sip') &&
+                       chairEl && chairEl.style.display !== 'none') {
+                const center = getChairCenter();
+                const zoom = (window.devicePixelRatio || 1) / baseDPR;
+                const scale = 1 / zoom;
+                const half = 62 * scale;
+                const c = clampToScreen(
+                    Math.round(center.x - half + CHAIR_OFFSET_X),
+                    Math.round(center.y - half + CHAIR_OFFSET_Y)
+                );
+                actorEl.style.left = c.x + 'px';
+                actorEl.style.top  = c.y + 'px';
             } else if (actorEl) {
+
                 // обычный случай — просто возвращаем босса в видимую область
                 const bc = clampToScreen(
                     parseFloat(actorEl.style.left) || 0,
@@ -1738,13 +2494,45 @@ function startZoomWatcher() {
 
             // вернуть стол в видимую область
             if (deskEl) {
-                const dc = clampDeskToScreen(
+                const dc = clampToScreen(
                     parseFloat(deskEl.style.left) || 0,
-                    parseFloat(deskEl.style.top)  || 0
+                    parseFloat(deskEl.style.top)  || 0,
+                    162
                 );
                 deskEl.style.left = dc.x + 'px';
                 deskEl.style.top  = dc.y + 'px';
             }
+            // вернуть кресло в видимую область
+            if (chairEl) {
+                const cc = clampToScreen(
+                    parseFloat(chairEl.style.left) || 0,
+                    parseFloat(chairEl.style.top)  || 0,
+                    130  // ← правильный размер
+                );
+                chairEl.style.left = cc.x + 'px';
+                chairEl.style.top  = cc.y + 'px';
+            }
+
+            // DEBOUNCE: сохраняем позиции только через 150ms после последнего изменения
+            clearTimeout(saveTimer);
+            saveTimer = setTimeout(() => {
+                if (actorEl) {
+                    const bx = parseFloat(actorEl.style.left) || 0;
+                    const by = parseFloat(actorEl.style.top) || 0;
+                    savePos(bx, by);
+                }
+                if (deskEl) {
+                    const dx = parseFloat(deskEl.style.left) || 0;
+                    const dy = parseFloat(deskEl.style.top) || 0;
+                    saveDeskPos(dx, dy);
+                }
+                                if (chairEl) {
+                    const cx = parseFloat(chairEl.style.left) || 0;
+                    const cy = parseFloat(chairEl.style.top) || 0;
+                    saveChairPos(cx, cy);
+                }
+
+            }, 150);
         }
         requestAnimationFrame(check);
     };
@@ -1752,11 +2540,10 @@ function startZoomWatcher() {
 }
 
 
-
-
-function clampToScreen(x, y) {
-    const maxX = window.innerWidth - 124;
-    const maxY = window.innerHeight - 124;
+// ограничить координаты границами экрана (с учётом размера объекта)
+function clampToScreen(x, y, objectSize = 124) {
+    const maxX = window.innerWidth - objectSize;
+    const maxY = window.innerHeight - objectSize;
     return {
         x: Math.max(0, Math.min(x, maxX)),
         y: Math.max(0, Math.min(y, maxY)),
@@ -1808,15 +2595,7 @@ function createBoss() {
     setupMenu();
     setupPetting();
     createDesk();
-
-    // иконки уведомлений следуют за боссом
-    const followBoss = () => {
-        positionGiftAlert();
-        positionLetterAlert();
-        positionCommentBubble();
-        requestAnimationFrame(followBoss);
-    };
-    requestAnimationFrame(followBoss);
+    createChair();
 
     let resizeTimer;
     window.addEventListener('resize', () => {
@@ -1836,7 +2615,7 @@ function createBoss() {
             if (deskEl) {
                 const dx = parseFloat(deskEl.style.left) || 0;
                 const dy = parseFloat(deskEl.style.top) || 0;
-                const dc = clampDeskToScreen(dx, dy);
+                const dc = clampToScreen(dx, dy, 162);
                 deskEl.style.left = dc.x + 'px';
                 deskEl.style.top  = dc.y + 'px';
                 saveDeskPos(dc.x, dc.y);
@@ -1870,16 +2649,35 @@ function setupDragging() {
             checkGiftProgress();
         }
         e.preventDefault();
-    e.preventDefault();
 
-    // Запрет перетаскивания во время работы
-    if (behavior && behavior.busy && behavior.lastAction === 'work' && animator.current === 'work') {
-        return;
-    }
+        // Запрет перетаскивания во время работы за столом
+        // (чибик хватается за стол, а стол тащит его за собой)
+        if (behavior && behavior.busy && behavior.lastAction === 'work' && animator.current === 'work') {
+            return;
+        }
+
+        // Запрет перетаскивания, пока чибик сидит в кресле.
+        // Благодаря этому клик проходит "сквозь" чибика на кресло,
+        // и кресло тащит чибика за собой — как это работает со столом.
+        if (behavior && behavior.busy && behavior.lastAction === 'chair' &&
+            (animator.current === 'chair_sit' || animator.current === 'chair_sip')) {
+            return;
+        }
+
+        // Подстраховка: если по какой-то причине остался режим кресла,
+        // но чибик уже не в анимации сидения — снимаем его,
+        // иначе контейнер останется 106×130 и обычные анимации исказятся.
+        if (actorEl.classList.contains('chair-mode')) {
+            actorEl.classList.remove('chair-mode');
+            chairLocked = false;
+            clearTimeout(behavior?.holdTimer);
+        }
+
 
 
         if (menuOpen) closeMenu();
         if (behavior) behavior.pause();
+
 
         const rect = actorEl.getBoundingClientRect();
         dragState.active = true;
@@ -1911,6 +2709,11 @@ function setupDragging() {
         const c = clampToScreen(newX, newY);
         actorEl.style.left = c.x + 'px';
         actorEl.style.top = c.y + 'px';
+
+        // ↓↓↓ ДОБАВИТЬ ЭТИ ТРИ СТРОКИ ↓↓↓
+        positionGiftAlert();
+        positionLetterAlert();
+        positionCommentBubble();
     });
 
     const endDrag = (e) => {
@@ -1943,102 +2746,120 @@ let menuEl = null;
 let menuOpen = false;
 
 const MENU_ITEMS = [
-    { action: 'pet',       icon: 'pet',       title: 'Погладить' },
-    { action: 'tictactoe', icon: 'tictactoe', title: 'Крестики-нолики' },
-    { action: 'checkers',  icon: 'checkers',  title: 'Шашки' },
-    { action: 'work',      icon: 'work',      title: 'Отправить работать' },
-    { action: 'letters',   icon: 'letters',   title: 'Письма и комментарии' },
-    { action: 'gifts',     icon: 'gifts',     title: 'Подарки' },
+    { action: 'pet',     icon: 'pet',     title: 'Погладить' },
+    { action: 'chair',   icon: 'chair',   title: 'Отправить в кресло' },
+    { action: 'games',   icon: 'games',   title: 'Игры' },
+    { action: 'work',    icon: 'work',    title: 'Отправить работать' },
+    { action: 'letters', icon: 'letters', title: 'Письма и комментарии' },
+    { action: 'gifts',   icon: 'gifts',   title: 'Подарки' },
 ];
+
+
+
+
 
 function buildMenu() {
     menuEl = document.createElement('div');
     menuEl.id = 'chibiBoss-menu';
     menuEl.style.display = 'none';
 
-    const header = document.createElement('div');
-    header.className = 'cb-menu-header';
-    header.innerHTML = `
-        <div class="cb-menu-name" id="cb-menu-name"></div>
-        <div class="cb-indicator">
-            <img class="cb-ind-sprite" id="cb-affection-sprite" alt="affection">
+const header = document.createElement('div');
+header.className = 'cb-menu-header';
+header.innerHTML = `
+    <div class="cb-menu-name" id="cb-menu-name"></div>
+    <div class="cb-indicator">
+        <img class="cb-ind-icon" src="${EXT_PATH}icons/indicators/affection.svg" alt="affection">
+        <div class="cb-ind-bar-wrap">
+            <div class="cb-ind-bar cb-aff-bar" id="cb-affection-bar"></div>
         </div>
-        <div class="cb-indicator">
-            <img class="cb-ind-sprite" id="cb-stress-sprite" alt="stress">
+        <span class="cb-ind-value" id="cb-affection-value">0%</span>
+    </div>
+    <div class="cb-indicator">
+        <img class="cb-ind-icon" src="${EXT_PATH}icons/indicators/stress.svg" alt="stress">
+        <div class="cb-ind-bar-wrap">
+            <div class="cb-ind-bar cb-stress-bar" id="cb-stress-bar"></div>
         </div>
-    `;
+        <span class="cb-ind-value" id="cb-stress-value">0%</span>
+    </div>
+`;
+
+
 
 
     menuEl.appendChild(header);
 
-    const ring = document.createElement('div');
-    ring.className = 'cb-menu-ring';
+const ring = document.createElement('div');
+ring.className = 'cb-menu-ring';
 
-    const radius = 100;
-    const cx = 130, cy = 130;
-    MENU_ITEMS.forEach((item, i) => {
-        const angle = (-90 + i * 60) * Math.PI / 180;
-        const x = cx + radius * Math.cos(angle) - 28;
-        const y = cy + radius * Math.sin(angle) - 28;
+const radius = 100;
+const cx = 130, cy = 130;
+const step = 360 / MENU_ITEMS.length;   // равномерный шаг: 6 иконок = 60° каждая
+MENU_ITEMS.forEach((item, i) => {
+    const angle = (-90 + i * step) * Math.PI / 180;
+    const x = cx + radius * Math.cos(angle) - 28;   // 28 = половина ширины кнопки (56px)
+    const y = cy + radius * Math.sin(angle) - 28;
 
-        const btn = document.createElement('button');
-        btn.className = 'cb-menu-item';
-        btn.title = item.title;
-        btn.style.left = x + 'px';
-        btn.style.top = y + 'px';
-        btn.style.setProperty('--cb-delay', (i * 0.03) + 's');
 
-        const img = document.createElement('img');
-        img.src = EXT_PATH + 'icons/' + item.icon + '.png';
-        img.alt = item.title;
-        btn.appendChild(img);
+    const btn = document.createElement('button');
+    btn.className = 'cb-menu-item';
+    btn.title = item.title;
+    btn.style.left = x + 'px';
+    btn.style.top = y + 'px';
+    btn.style.setProperty('--cb-delay', (i * 0.03) + 's');
 
-        btn.addEventListener('click', (e) => {
-            e.stopPropagation();
-            handleMenuAction(item.action);
-            closeMenu();
-        });
+    // CSS круг с SVG иконкой внутри
+    const circle = document.createElement('div');
+    circle.className = 'cb-menu-circle';
 
-        ring.appendChild(btn);
+    const img = document.createElement('img');
+    img.className = 'cb-menu-icon';
+    img.src = EXT_PATH + 'icons/menu/' + item.icon + '.svg';
+    img.alt = item.title;
+
+    circle.appendChild(img);
+    btn.appendChild(circle);
+
+    btn.addEventListener('click', (e) => {
+        e.stopPropagation();
+        handleMenuAction(item.action);
+        closeMenu();
     });
+
+    ring.appendChild(btn);
+});
+
+
 
     menuEl.appendChild(ring);
     document.getElementById('chibiBoss-layer').appendChild(menuEl);
     menuEl.addEventListener('contextmenu', (e) => e.preventDefault());
 }
 
-const INDICATOR_STEPS = [0, 5, 10, 15, 20, 25, 30, 35, 40, 45, 50, 55, 60, 65, 70, 75, 80, 85, 90, 95, 100];
-
-
 function updateIndicators() {
     const a = Math.max(0, Math.min(100, settings.affection ?? 60));
     const s = Math.max(0, Math.min(100, settings.stress ?? 20));
 
-    const aStep = INDICATOR_STEPS.reduce((prev, curr) =>
-        Math.abs(curr - a) < Math.abs(prev - a) ? curr : prev
-    );
-    const sStep = INDICATOR_STEPS.reduce((prev, curr) =>
-        Math.abs(curr - s) < Math.abs(prev - s) ? curr : prev
-    );
+    const affBar = document.getElementById('cb-affection-bar');
+    const stressBar = document.getElementById('cb-stress-bar');
+    const affValue = document.getElementById('cb-affection-value');
+    const stressValue = document.getElementById('cb-stress-value');
 
-    const affSprite = document.getElementById('cb-affection-sprite');
-    const stressSprite = document.getElementById('cb-stress-sprite');
-
-    if (affSprite) affSprite.src = EXT_PATH + 'assets/indicators/affection/' + aStep + '.png';
-    if (stressSprite) stressSprite.src = EXT_PATH + 'assets/indicators/stress/' + sStep + '.png';
+    if (affBar) affBar.style.width = a + '%';
+    if (stressBar) stressBar.style.width = s + '%';
+    if (affValue) affValue.textContent = Math.round(a) + '%';
+    if (stressValue) stressValue.textContent = Math.round(s) + '%';
 }
+
 
 
 function openMenu() {
     if (menuOpen) return;
     playSound('menu_open.ogg');
     menuOpen = true;
-    if (behavior) behavior.freezeForMenu();
+if (behavior) behavior.freezeForMenu();
 
     document.getElementById('cb-menu-name').textContent = settings.name || 'Boss';
     updateIndicators();
-
-
 
     const rect = actorEl.getBoundingClientRect();
     const centerX = rect.left + rect.width / 2;
@@ -2070,6 +2891,12 @@ function closeMenu() {
 
 function handleMenuAction(action) {
     playSound('button_click.ogg');
+
+    // Выходим из кресла ТОЛЬКО для действий, требующих встать
+    if (behavior && (action === 'pet' || action === 'work' || action === 'chair')) {
+        behavior.leaveChairMode();
+    }
+
     switch (action) {
         case 'pet':
             if (behavior && behavior.busy && behavior.lastAction === 'work') {
@@ -2088,12 +2915,16 @@ function handleMenuAction(action) {
             }
             break;
 
-        case 'tictactoe':
-            openTicTacToe();
+        case 'chair':
+            if (!settings.chairEnabled || !chairEl || chairEl.style.display === 'none') {
+                notify('Сначала включите «Кресло» в настройках расширения.');
+            } else {
+                openChairChooser();
+            }
             break;
 
-        case 'checkers':
-            openCheckers();
+        case 'games':
+            openGameChooser();
             break;
 
         case 'gifts':
@@ -2101,10 +2932,11 @@ function handleMenuAction(action) {
             break;
 
         case 'letters':
-    openLetters();
-    break;
+            openLetters();
+            break;
     }
 }
+
 
 function notify(msg) {
     if (typeof toastr !== 'undefined') {
@@ -2119,6 +2951,9 @@ let bubbleEl = null;
 let bubbleTimer = null;
 
 function showBubble(text, durationMs = 2000) {
+    // не перебиваем активный длинный комментарий от API
+    if (commentBubbleActive) return;
+
     if (!bubbleEl) {
         bubbleEl = document.createElement('div');
         bubbleEl.id = 'chibiBoss-bubble';
@@ -2141,6 +2976,7 @@ function showBubble(text, durationMs = 2000) {
         bubbleEl.classList.remove('show');
     }, durationMs);
 }
+
 
 // маленькое меню выбора времени работы
 function openWorkChooser() {
@@ -2213,28 +3049,169 @@ function openWorkChooser() {
     };
     setTimeout(() => document.addEventListener('pointerdown', closeChooser, true), 0);
 }
+// маленькое меню выбора времени для кресла
+function openChairChooser() {
+    const old = document.getElementById('cb-chair-chooser');
+    if (old) old.remove();
 
+    const box = document.createElement('div');
+    box.id = 'cb-chair-chooser';
+    Object.assign(box.style, {
+        position: 'absolute',
+        zIndex: '10002',
+        background: 'linear-gradient(160deg, var(--cb-panel) 0%, var(--cb-panel-deep) 100%)',
+        backdropFilter: 'blur(10px)',
+        border: '3px solid var(--cb-accent)',
+        borderRadius: '12px',
+        padding: '8px',
+        display: 'flex',
+        gap: '6px',
+        pointerEvents: 'auto',
+        boxShadow: '0 6px 18px rgba(0,0,0,0.5)',
+    });
+
+    const options = [5, 10, 15];
+    options.forEach(min => {
+        const btn = document.createElement('button');
+        btn.textContent = min + ' мин';
+        Object.assign(btn.style, {
+            cursor: 'pointer',
+            border: '2px solid var(--cb-line)',
+            borderRadius: '8px',
+            padding: '6px 12px',
+            background: 'var(--cb-fill)',
+            color: 'var(--cb-text)',
+            fontFamily: "'cbPixel', monospace",
+            fontSize: '11px',
+            fontWeight: 'bold',
+        });
+        btn.addEventListener('mouseenter', () => {
+            btn.style.background = 'var(--cb-line)';
+        });
+        btn.addEventListener('mouseleave', () => {
+            btn.style.background = 'var(--cb-fill)';
+        });
+        btn.addEventListener('click', (e) => {
+            e.stopPropagation();
+            box.remove();
+            if (behavior) behavior.goToChair(min * 60 * 1000);
+            notify(`Отправлен в кресло на ${min} мин.`);
+        });
+        box.appendChild(btn);
+    });
+
+    const rect = actorEl.getBoundingClientRect();
+    box.style.left = (rect.left + rect.width / 2 - 80) + 'px';
+    box.style.top = (rect.top - 50) + 'px';
+
+    document.getElementById('chibiBoss-layer').appendChild(box);
+
+    const closeChooser = (e) => {
+        if (box.contains(e.target)) return;
+        box.remove();
+        document.removeEventListener('pointerdown', closeChooser, true);
+    };
+    setTimeout(() => document.addEventListener('pointerdown', closeChooser, true), 0);
+}
+
+// Меню выбора игры (крестики, шашки, шахматы)
+function openGameChooser() {
+    const old = document.getElementById('cb-game-chooser');
+    if (old) old.remove();
+
+    const box = document.createElement('div');
+    box.id = 'cb-game-chooser';
+    Object.assign(box.style, {
+        position: 'absolute',
+        zIndex: '10002',
+        background: 'linear-gradient(160deg, var(--cb-panel) 0%, var(--cb-panel-deep) 100%)',
+        backdropFilter: 'blur(10px)',
+        border: '3px solid var(--cb-accent)',
+        borderRadius: '12px',
+        padding: '8px',
+        display: 'flex',
+        gap: '6px',
+        flexDirection: 'column',
+        pointerEvents: 'auto',
+        boxShadow: '0 6px 18px rgba(0,0,0,0.5)',
+    });
+
+    const games = [
+        { name: 'Крестики-нолики', fn: openTicTacToe },
+        { name: 'Шашки', fn: openCheckers },
+        { name: 'Шахматы', fn: openChess },
+    ];
+
+    games.forEach(game => {
+        const btn = document.createElement('button');
+        btn.textContent = game.name;
+        Object.assign(btn.style, {
+            cursor: 'pointer',
+            border: '2px solid var(--cb-line)',
+            borderRadius: '8px',
+            padding: '8px 14px',
+            background: 'var(--cb-fill)',
+            color: 'var(--cb-text)',
+            fontFamily: "'cbPixel', monospace",
+            fontSize: '11px',
+            fontWeight: 'bold',
+            whiteSpace: 'nowrap',
+        });
+        btn.addEventListener('mouseenter', () => {
+            btn.style.background = 'var(--cb-line)';
+        });
+        btn.addEventListener('mouseleave', () => {
+            btn.style.background = 'var(--cb-fill)';
+        });
+        btn.addEventListener('click', (e) => {
+            e.stopPropagation();
+            box.remove();
+            game.fn();
+        });
+        box.appendChild(btn);
+    });
+
+    const rect = actorEl.getBoundingClientRect();
+    box.style.left = (rect.left + rect.width / 2 - 80) + 'px';
+    box.style.top = (rect.top - 120) + 'px';
+
+    document.getElementById('chibiBoss-layer').appendChild(box);
+
+    const closeChooser = (e) => {
+        if (box.contains(e.target)) return;
+        box.remove();
+        document.removeEventListener('pointerdown', closeChooser, true);
+    };
+    setTimeout(() => document.addEventListener('pointerdown', closeChooser, true), 0);
+}
 
 function setupMenu() {
     buildMenu();
-    actorEl.addEventListener('contextmenu', (e) => {
-        e.preventDefault();
-        e.stopPropagation();
-        if (menuOpen) {
-            closeMenu();
-        } else {
-            openMenu();
-        }
-    });
+actorEl.addEventListener('contextmenu', (e) => {
+    e.preventDefault();
+    e.stopPropagation();
+    if (menuOpen) {
+        closeMenu();
+    } else {
+        openMenu();
+    }
+});
+
 }
 
 // ------------------------------------------------------------
 //  РАБОЧИЙ СТОЛ
 // ------------------------------------------------------------
 const DESK_POS_KEY = 'chibiBoss_deskPos';
+const CHAIR_POS_KEY = 'chibiBoss_chairPos';  
+
 let deskEl = null;
-let deskLocked = false;  // блокировка перетаскивания стола
+let deskLocked = false;
 let statsEl = null;
+
+let chairEl = null;
+let chairLocked = false;
+
 
 function loadDeskPos() {
     try {
@@ -2249,14 +3226,19 @@ function saveDeskPos(x, y) {
     localStorage.setItem(DESK_POS_KEY, JSON.stringify({ x, y }));
 }
 
-function clampDeskToScreen(x, y) {
-    const maxX = window.innerWidth - 162;
-    const maxY = window.innerHeight - 162;
-    return {
-        x: Math.max(0, Math.min(x, maxX)),
-        y: Math.max(0, Math.min(y, maxY)),
-    };
+function loadChairPos() {
+    try {
+        const raw = localStorage.getItem(CHAIR_POS_KEY);
+        return raw ? JSON.parse(raw) : null;
+    } catch (e) {
+        return null;
+    }
 }
+
+function saveChairPos(x, y) {
+    localStorage.setItem(CHAIR_POS_KEY, JSON.stringify({ x, y }));
+}
+
 
 function createDesk() {
     deskEl = document.createElement('div');
@@ -2291,12 +3273,13 @@ function createDesk() {
     const saved = loadDeskPos();
     let dx, dy;
     if (saved) {
-        const c = clampDeskToScreen(saved.x, saved.y);
+        const c = clampToScreen(saved.x, saved.y, 162);
         dx = c.x; dy = c.y;
     } else {
         dx = 20;
         dy = window.innerHeight - 182;
     }
+
     deskEl.style.left = dx + 'px';
     deskEl.style.top = dy + 'px';
 
@@ -2309,6 +3292,50 @@ function createDesk() {
 
     // показать/спрятать по настройке
     deskEl.style.display = settings.deskEnabled ? 'block' : 'none';
+}
+function createChair() {
+    chairEl = document.createElement('div');
+    chairEl.id = 'chibiBoss-chair';
+
+    const img = document.createElement('img');
+    img.className = 'cb-chair-img';
+    img.src = EXT_PATH + 'assets/chair.png';
+    img.alt = 'Chair';
+    img.draggable = false;
+    chairEl.appendChild(img);
+
+    // подсветка кресла при наведении (как у стола)
+    chairEl.addEventListener('pointerenter', () => {
+        img.src = EXT_PATH + 'assets/chair_hover.png';
+    });
+
+    chairEl.addEventListener('pointerleave', () => {
+        img.src = EXT_PATH + 'assets/chair.png';
+    });
+
+    document.getElementById('chibiBoss-layer').appendChild(chairEl);
+
+    // стартовая позиция: правый нижний угол
+    const saved = loadChairPos();
+    let cx, cy;
+    if (saved) {
+        const c = clampToScreen(saved.x, saved.y, 130);
+        cx = c.x; cy = c.y;
+    } else {
+        cx = window.innerWidth - 200;
+        cy = window.innerHeight - 150;
+    }
+
+    chairEl.style.left = cx + 'px';
+    chairEl.style.top = cy + 'px';
+
+    const zoom = (window.devicePixelRatio || 1) / baseDPR;
+    chairEl.style.transform = `scale(${1 / zoom})`;
+
+    setupChairDragging();
+
+    // показать/спрятать по настройке
+    chairEl.style.display = settings.chairEnabled ? 'block' : 'none';
 }
 
 // --- перетаскивание стола (за сам стол, не за календарь) ---
@@ -2339,9 +3366,10 @@ function setupDeskDragging() {
 
         const nx = e.clientX - deskDrag.offsetX;
         const ny = e.clientY - deskDrag.offsetY;
-        const c = clampDeskToScreen(nx, ny);
+        const c = clampToScreen(nx, ny, 130);
         deskEl.style.left = c.x + 'px';
         deskEl.style.top = c.y + 'px';
+
 
         // если босс работает за столом — двигаем его вместе со столом
         if (behavior && behavior.busy && behavior.lastAction === 'work' && animator.current === 'work') {
@@ -2372,6 +3400,86 @@ function setupDeskDragging() {
     deskEl.addEventListener('pointerup', endDeskDrag);
     deskEl.addEventListener('pointercancel', endDeskDrag);
 }
+// --- перетаскивание кресла ---
+let chairDrag = { active: false, offsetX: 0, offsetY: 0, pointerId: null };
+
+function setupChairDragging() {
+    // Основной обработчик: клик по самому креслу
+    chairEl.addEventListener('pointerdown', (e) => {
+        if (e.button !== 0) return;
+        e.preventDefault();
+        startChairDrag(e);
+    });
+
+    // Дополнительный обработчик: клик по чибику, пока он сидит в кресле.
+    // Если чибик сидит — считаем это кликом по креслу (расширяем зону захвата).
+    actorEl.addEventListener('pointerdown', (e) => {
+        if (e.button !== 0) return;
+        // Проверяем: чибик сейчас сидит в кресле?
+        if (behavior && behavior.busy && behavior.lastAction === 'chair' &&
+            (animator.current === 'chair_sit' || animator.current === 'chair_sip')) {
+            e.preventDefault();
+            e.stopPropagation();
+            startChairDrag(e);
+        }
+    }, true); // true = фаза захвата, сработает раньше обработчика перетаскивания чибика
+
+    chairEl.addEventListener('pointermove', (e) => {
+        if (!chairDrag.active || e.pointerId !== chairDrag.pointerId) return;
+
+        const oldRect = chairEl.getBoundingClientRect();
+        const oldCenterX = oldRect.left + oldRect.width / 2;
+        const oldCenterY = oldRect.top + oldRect.height / 2;
+
+        const nx = e.clientX - chairDrag.offsetX;
+        const ny = e.clientY - chairDrag.offsetY;
+        const c = clampToScreen(nx, ny, 130);
+        chairEl.style.left = c.x + 'px';
+        chairEl.style.top = c.y + 'px';
+
+        // если босс сидит в кресле — двигаем его вместе с креслом
+        if (behavior && behavior.busy && behavior.lastAction === 'chair' &&
+            (animator.current === 'chair_sit' || animator.current === 'chair_sip')) {
+            const newRect = chairEl.getBoundingClientRect();
+            const newCenterX = newRect.left + newRect.width / 2;
+            const newCenterY = newRect.top + newRect.height / 2;
+
+            const dx = newCenterX - oldCenterX;
+            const dy = newCenterY - oldCenterY;
+
+            const bossX = parseFloat(actorEl.style.left) || 0;
+            const bossY = parseFloat(actorEl.style.top) || 0;
+
+            actorEl.style.left = Math.round(bossX + dx) + 'px';
+            actorEl.style.top = Math.round(bossY + dy) + 'px';
+        }
+    });
+
+    const endChairDrag = (e) => {
+        if (!chairDrag.active || e.pointerId !== chairDrag.pointerId) return;
+        chairDrag.active = false;
+        chairEl.classList.remove('dragging');
+        try { chairEl.releasePointerCapture(e.pointerId); } catch (err) {}
+        const rect = chairEl.getBoundingClientRect();
+        saveChairPos(rect.left, rect.top);
+    };
+
+    chairEl.addEventListener('pointerup', endChairDrag);
+    chairEl.addEventListener('pointercancel', endChairDrag);
+}
+
+// Вспомогательная функция: начать перетаскивание кресла
+function startChairDrag(e) {
+    const rect = chairEl.getBoundingClientRect();
+    chairDrag.active = true;
+    chairDrag.pointerId = e.pointerId;
+    chairDrag.offsetX = e.clientX - rect.left;
+    chairDrag.offsetY = e.clientY - rect.top;
+
+    chairEl.classList.add('dragging');
+    chairEl.setPointerCapture(e.pointerId);
+}
+
 
 
 // --- календарь: подсветка + клик ---
@@ -2399,6 +3507,15 @@ function getDeskCenter() {
         y: Math.round(centerY),
     };
 }
+function getChairCenter() {
+    const rect = chairEl.getBoundingClientRect();
+    const centerX = rect.left + rect.width / 2;
+    const centerY = rect.top + rect.height / 2;
+    return {
+        x: Math.round(centerX),
+        y: Math.round(centerY),
+    };
+}
 
 
 // показать/спрятать стол (вызывается из настроек)
@@ -2423,6 +3540,25 @@ function setDeskVisible(visible) {
     }
 }
 
+function setChairVisible(visible) {
+    if (!chairEl) return;
+    chairEl.style.display = visible ? 'block' : 'none';
+    if (!visible) {
+        // если босс сейчас сидит в кресле — прерываем
+        if (behavior && behavior.busy && behavior.lastAction === 'chair') {
+            clearTimeout(behavior.holdTimer);
+            if (behavior.walkRaf) {
+                cancelAnimationFrame(behavior.walkRaf);
+                behavior.walkRaf = null;
+            }
+            chairLocked = false;
+            behavior.busy = false;
+            behavior.lastAction = null;
+            animator.play('idle_front');
+            behavior.scheduleNext();
+        }
+    }
+}
 
 // ------------------------------------------------------------
 //  БОРД СТАТИСТИКИ (по клику на календарь)
@@ -2505,6 +3641,8 @@ function startSTTimer() {
     if (stTimer) return;
     stTimeStart = Date.now();
     stTimer = setInterval(() => {
+        if (!settings.enabled) return; // ← НОВАЯ СТРОКА: если персонаж выключен — не считаем время
+
         const today = getTodayStr();
         const saved = loadTimeInST();
         const elapsed = Math.floor((Date.now() - stTimeStart) / 1000);
@@ -2601,12 +3739,21 @@ const GAME_STATS_KEY = 'chibiBoss_gameStats';
 function loadGameStats() {
     try {
         const raw = localStorage.getItem(GAME_STATS_KEY);
-        const def = { ttt: { w: 0, l: 0 }, checkers: { w: 0, l: 0 } };
+        const def = {
+            ttt: { w: 0, l: 0 },
+            checkers: { w: 0, l: 0 },
+            chess: { w: 0, l: 0 },
+        };
         return raw ? { ...def, ...JSON.parse(raw) } : def;
     } catch (e) {
-        return { ttt: { w: 0, l: 0 }, checkers: { w: 0, l: 0 } };
+        return {
+            ttt: { w: 0, l: 0 },
+            checkers: { w: 0, l: 0 },
+            chess: { w: 0, l: 0 },
+        };
     }
 }
+
 
 function saveGameStats(s) {
     localStorage.setItem(GAME_STATS_KEY, JSON.stringify(s));
@@ -2852,12 +3999,16 @@ function tttEnd(res) {
 }
 
 function openTicTacToe() {
+    closeCheckers();
+    closeChess();
     if (!tttEl) buildTttBoard();
     tttUpdateScore();
     tttReset();
     tttEl.style.display = 'block';
     positionBoardNearBoss(tttEl);
 }
+
+
 
 function closeTtt() {
     if (tttEl) tttEl.style.display = 'none';
@@ -3091,6 +4242,7 @@ function chRender() {
 }
 
 function chReset() {
+    chStopTimer();
     chBoard = chInitBoard();
     chSelected = null;
     chValidMoves = [];
@@ -3158,11 +4310,10 @@ function chAiTurn() {
 
         chBoard = chApply(chBoard, move);
         if (move.cap) chCaptured.player++;
-        chRender();
+        // НЕ рисуем внутри цикла — подождём завершения цепочки
 
         // продолжение боя
         if (move.cap && chHasMoreCaptures(chBoard, move.to[0], move.to[1], 'ai')) {
-            // делаем небольшую паузу визуально не будем — просто продолжаем
             const more = chGetMoves(chBoard, 'ai').captures
                 .filter(m => m.from[0] === move.to[0] && m.from[1] === move.to[1]);
             if (more.length) { continue; }
@@ -3170,7 +4321,7 @@ function chAiTurn() {
         moved = false;
     }
 
-    chRender();
+    chRender();  // одна перерисовка после завершения хода
     if (chCheckEnd('ai')) return;
 
     chLocked = false;
@@ -3280,6 +4431,8 @@ function chCheckEnd(justMoved) {
 }
 
 function openCheckers() {
+    closeTtt();
+    closeChess();
     if (!chEl) buildCheckersBoard();
     chUpdateScore();
     chReset();
@@ -3287,9 +4440,674 @@ function openCheckers() {
     positionBoardNearBoss(chEl);
 }
 
+
+
 function closeCheckers() {
     if (chEl) chEl.style.display = 'none';
     chStopTimer();
+}
+// ============================================================
+//  ШАХМАТЫ  (игрок = белые снизу, босс = чёрные сверху)
+//  Ряд 0 — верх (чёрные), ряд 7 — низ (белые).
+//  Фигуры: объект { type, color, moved }
+//  type: 'p' пешка, 'n' конь, 'b' слон, 'r' ладья, 'q' ферзь, 'k' король
+//  color: 'w' игрок (белые), 'b' босс (чёрные)
+// ============================================================
+let csEl = null;
+let csBoard = null;         // 8x8 массив: null или { type, color, moved }
+let csSelected = null;      // [r,c] выбранной фигуры
+let csValidMoves = [];      // ходы выбранной фигуры
+let csLocked = false;       // блок ввода во время хода босса
+let csEnPassant = null;     // [r,c] клетка для взятия на проходе
+let csCaptured = { player: [], ai: [] }; // съеденные фигуры (типы)
+
+let csTimer = null;
+let csStartTime = 0;
+
+// символы фигур (Unicode) для отрисовки
+const CS_GLYPH = {
+    wp: '♟', wn: '♞', wb: '♝', wr: '♜', wq: '♛', wk: '♚',
+    bp: '♟', bn: '♞', bb: '♝', br: '♜', bq: '♛', bk: '♚',
+};
+
+
+// ценность фигур (для ИИ и подсчёта)
+const CS_VALUE = { p: 100, n: 320, b: 330, r: 500, q: 900, k: 20000 };
+
+// направления ходов
+const CS_DIRS = {
+    n: [[-2,-1],[-2,1],[-1,-2],[-1,2],[1,-2],[1,2],[2,-1],[2,1]],
+    b: [[-1,-1],[-1,1],[1,-1],[1,1]],
+    r: [[-1,0],[1,0],[0,-1],[0,1]],
+    q: [[-1,-1],[-1,1],[1,-1],[1,1],[-1,0],[1,0],[0,-1],[0,1]],
+    k: [[-1,-1],[-1,1],[1,-1],[1,1],[-1,0],[1,0],[0,-1],[0,1]],
+};
+
+function csTimerStart() {
+    csTimerStop();
+    csStartTime = Date.now();
+    csTimer = setInterval(() => {
+        if (!csEl) return;
+        const elapsed = Math.floor((Date.now() - csStartTime) / 1000);
+        const m = Math.floor(elapsed / 60);
+        const s = elapsed % 60;
+        const el = document.getElementById('cb-cs-timer');
+        if (el) el.textContent = `${String(m).padStart(2, '0')}:${String(s).padStart(2, '0')}`;
+    }, 1000);
+}
+
+function csTimerStop() {
+    if (csTimer) { clearInterval(csTimer); csTimer = null; }
+}
+
+function csInside(r, c) { return r >= 0 && r < 8 && c >= 0 && c < 8; }
+
+// стартовая расстановка
+function csInitBoard() {
+    const b = Array.from({ length: 8 }, () => Array(8).fill(null));
+    const back = ['r','n','b','q','k','b','n','r'];
+    for (let c = 0; c < 8; c++) {
+        b[0][c] = { type: back[c], color: 'b', moved: false };
+        b[1][c] = { type: 'p',     color: 'b', moved: false };
+        b[6][c] = { type: 'p',     color: 'w', moved: false };
+        b[7][c] = { type: back[c], color: 'w', moved: false };
+    }
+    return b;
+}
+
+// глубокая копия доски
+function csClone(board) {
+    return board.map(row => row.map(p => p ? { ...p } : null));
+}
+
+// собрать псевдо-ходы одной фигуры (без проверки на шах)
+function csPieceMoves(board, r, c, ep) {
+    const p = board[r][c];
+    if (!p) return [];
+    const moves = [];
+    const foe = p.color === 'w' ? 'b' : 'w';
+
+    if (p.type === 'p') {
+        const fwd = p.color === 'w' ? -1 : 1;      // белые идут вверх
+        const startRow = p.color === 'w' ? 6 : 1;
+        const nr = r + fwd;
+        // ход вперёд на 1
+        if (csInside(nr, c) && !board[nr][c]) {
+            moves.push({ from: [r, c], to: [nr, c] });
+            // ход на 2 из начальной позиции
+            const nr2 = r + fwd * 2;
+            if (r === startRow && !board[nr2][c]) {
+                moves.push({ from: [r, c], to: [nr2, c], dbl: true });
+            }
+        }
+        // взятия по диагонали
+        for (const dc of [-1, 1]) {
+            const cc = c + dc;
+            if (!csInside(nr, cc)) continue;
+            if (board[nr][cc] && board[nr][cc].color === foe) {
+                moves.push({ from: [r, c], to: [nr, cc] });
+            }
+            // взятие на проходе
+            if (ep && ep[0] === nr && ep[1] === cc) {
+                moves.push({ from: [r, c], to: [nr, cc], ep: true });
+            }
+        }
+    } else if (p.type === 'n' || p.type === 'k') {
+        for (const [dr, dc] of CS_DIRS[p.type]) {
+            const nr = r + dr, nc = c + dc;
+            if (!csInside(nr, nc)) continue;
+            const t = board[nr][nc];
+            if (!t || t.color === foe) moves.push({ from: [r, c], to: [nr, nc] });
+        }
+    } else {
+        // слон / ладья / ферзь — скользят
+        for (const [dr, dc] of CS_DIRS[p.type]) {
+            let nr = r + dr, nc = c + dc;
+            while (csInside(nr, nc)) {
+                const t = board[nr][nc];
+                if (!t) { moves.push({ from: [r, c], to: [nr, nc] }); }
+                else { if (t.color === foe) moves.push({ from: [r, c], to: [nr, nc] }); break; }
+                nr += dr; nc += dc;
+            }
+        }
+    }
+    return moves;
+}
+
+// найти короля цвета color
+function csFindKing(board, color) {
+    for (let r = 0; r < 8; r++)
+        for (let c = 0; c < 8; c++)
+            if (board[r][c] && board[r][c].type === 'k' && board[r][c].color === color)
+                return [r, c];
+    return null;
+}
+
+// атакована ли клетка [r,c] стороной byColor
+function csIsAttacked(board, r, c, byColor) {
+    for (let i = 0; i < 8; i++) {
+        for (let j = 0; j < 8; j++) {
+            const p = board[i][j];
+            if (!p || p.color !== byColor) continue;
+            if (p.type === 'p') {
+                const fwd = p.color === 'w' ? -1 : 1;
+                if (i + fwd === r && (j - 1 === c || j + 1 === c)) return true;
+            } else {
+                const ms = csPieceMoves(board, i, j, null);
+                if (ms.some(m => m.to[0] === r && m.to[1] === c)) return true;
+            }
+        }
+    }
+    return false;
+}
+
+// под шахом ли король цвета color
+function csInCheck(board, color) {
+    const k = csFindKing(board, color);
+    if (!k) return false;
+    return csIsAttacked(board, k[0], k[1], color === 'w' ? 'b' : 'w');
+}
+
+// применить ход к КОПИИ доски; вернуть { board, ep }
+function csApply(board, move) {
+    const nb = csClone(board);
+    const [fr, fc] = move.from;
+    const [tr, tc] = move.to;
+    const piece = nb[fr][fc];
+    let newEp = null;
+
+    nb[fr][fc] = null;
+
+    // взятие на проходе — убрать пешку сбоку
+    if (move.ep) {
+        nb[fr][tc] = null;
+    }
+    // рокировка — двигаем ладью
+    if (move.castle) {
+        const row = fr;
+        if (tc === 6) { nb[row][5] = nb[row][7]; nb[row][7] = null; if (nb[row][5]) nb[row][5].moved = true; }
+        else if (tc === 2) { nb[row][3] = nb[row][0]; nb[row][0] = null; if (nb[row][3]) nb[row][3].moved = true; }
+    }
+
+    piece.moved = true;
+    // превращение пешки в ферзя
+    if (piece.type === 'p' && (tr === 0 || tr === 7)) piece.type = 'q';
+    nb[tr][tc] = piece;
+
+    // выставить клетку для взятия на проходе
+    if (move.dbl) newEp = [(fr + tr) / 2, fc];
+
+    return { board: nb, ep: newEp };
+}
+
+// все ЛЕГАЛЬНЫЕ ходы стороны color (не оставляющие короля под шахом)
+function csLegalMoves(board, color, ep) {
+    const legal = [];
+    for (let r = 0; r < 8; r++) {
+        for (let c = 0; c < 8; c++) {
+            const p = board[r][c];
+            if (!p || p.color !== color) continue;
+            const pseudo = csPieceMoves(board, r, c, ep);
+            for (const m of pseudo) {
+                const { board: nb } = csApply(board, m);
+                if (!csInCheck(nb, color)) legal.push(m);
+            }
+        }
+    }
+    // рокировки (добавляем, если легальны)
+    csAddCastling(board, color, legal);
+    return legal;
+}
+
+// добавить ходы-рокировки, если возможны
+function csAddCastling(board, color, legal) {
+    const row = color === 'w' ? 7 : 0;
+    const king = board[row][4];
+    if (!king || king.type !== 'k' || king.moved) return;
+    if (csIsAttacked(board, row, 4, color === 'w' ? 'b' : 'w')) return; // король под шахом
+
+    // короткая рокировка (вправо)
+    const rookK = board[row][7];
+    if (rookK && rookK.type === 'r' && !rookK.moved &&
+        !board[row][5] && !board[row][6] &&
+        !csIsAttacked(board, row, 5, color === 'w' ? 'b' : 'w') &&
+        !csIsAttacked(board, row, 6, color === 'w' ? 'b' : 'w')) {
+        legal.push({ from: [row, 4], to: [row, 6], castle: true });
+    }
+    // длинная рокировка (влево)
+    const rookQ = board[row][0];
+    if (rookQ && rookQ.type === 'r' && !rookQ.moved &&
+        !board[row][1] && !board[row][2] && !board[row][3] &&
+        !csIsAttacked(board, row, 3, color === 'w' ? 'b' : 'w') &&
+        !csIsAttacked(board, row, 2, color === 'w' ? 'b' : 'w')) {
+        legal.push({ from: [row, 4], to: [row, 2], castle: true });
+    }
+}
+// ---- таблицы позиционной ценности (бонус за хорошие клетки) ----
+// значения даны с точки зрения БЕЛЫХ (ряд 7 — низ). Для чёрных зеркалим.
+const CS_PST = {
+    p: [
+        [ 0,  0,  0,  0,  0,  0,  0,  0],
+        [50, 50, 50, 50, 50, 50, 50, 50],
+        [10, 10, 20, 30, 30, 20, 10, 10],
+        [ 5,  5, 10, 25, 25, 10,  5,  5],
+        [ 0,  0,  0, 20, 20,  0,  0,  0],
+        [ 5, -5,-10,  0,  0,-10, -5,  5],
+        [ 5, 10, 10,-20,-20, 10, 10,  5],
+        [ 0,  0,  0,  0,  0,  0,  0,  0],
+    ],
+    n: [
+        [-50,-40,-30,-30,-30,-30,-40,-50],
+        [-40,-20,  0,  0,  0,  0,-20,-40],
+        [-30,  0, 10, 15, 15, 10,  0,-30],
+        [-30,  5, 15, 20, 20, 15,  5,-30],
+        [-30,  0, 15, 20, 20, 15,  0,-30],
+        [-30,  5, 10, 15, 15, 10,  5,-30],
+        [-40,-20,  0,  5,  5,  0,-20,-40],
+        [-50,-40,-30,-30,-30,-30,-40,-50],
+    ],
+    b: [
+        [-20,-10,-10,-10,-10,-10,-10,-20],
+        [-10,  0,  0,  0,  0,  0,  0,-10],
+        [-10,  0,  5, 10, 10,  5,  0,-10],
+        [-10,  5,  5, 10, 10,  5,  5,-10],
+        [-10,  0, 10, 10, 10, 10,  0,-10],
+        [-10, 10, 10, 10, 10, 10, 10,-10],
+        [-10,  5,  0,  0,  0,  0,  5,-10],
+        [-20,-10,-10,-10,-10,-10,-10,-20],
+    ],
+    r: [
+        [ 0,  0,  0,  0,  0,  0,  0,  0],
+        [ 5, 10, 10, 10, 10, 10, 10,  5],
+        [-5,  0,  0,  0,  0,  0,  0, -5],
+        [-5,  0,  0,  0,  0,  0,  0, -5],
+        [-5,  0,  0,  0,  0,  0,  0, -5],
+        [-5,  0,  0,  0,  0,  0,  0, -5],
+        [-5,  0,  0,  0,  0,  0,  0, -5],
+        [ 0,  0,  0,  5,  5,  0,  0,  0],
+    ],
+    q: [
+        [-20,-10,-10, -5, -5,-10,-10,-20],
+        [-10,  0,  0,  0,  0,  0,  0,-10],
+        [-10,  0,  5,  5,  5,  5,  0,-10],
+        [ -5,  0,  5,  5,  5,  5,  0, -5],
+        [  0,  0,  5,  5,  5,  5,  0, -5],
+        [-10,  5,  5,  5,  5,  5,  0,-10],
+        [-10,  0,  5,  0,  0,  0,  0,-10],
+        [-20,-10,-10, -5, -5,-10,-10,-20],
+    ],
+    k: [
+        [-30,-40,-40,-50,-50,-40,-40,-30],
+        [-30,-40,-40,-50,-50,-40,-40,-30],
+        [-30,-40,-40,-50,-50,-40,-40,-30],
+        [-30,-40,-40,-50,-50,-40,-40,-30],
+        [-20,-30,-30,-40,-40,-30,-30,-20],
+        [-10,-20,-20,-20,-20,-20,-20,-10],
+        [ 20, 20,  0,  0,  0,  0, 20, 20],
+        [ 20, 30, 10,  0,  0, 10, 30, 20],
+    ],
+};
+
+// оценка позиции. Положительно = хорошо для БОССА (чёрные).
+function csEvaluate(board) {
+    let score = 0;
+    for (let r = 0; r < 8; r++) {
+        for (let c = 0; c < 8; c++) {
+            const p = board[r][c];
+            if (!p) continue;
+            const material = CS_VALUE[p.type];
+            // позиционный бонус: для белых берём как есть, для чёрных зеркалим по вертикали
+            const pst = CS_PST[p.type];
+            const posBonus = p.color === 'w' ? pst[r][c] : pst[7 - r][c];
+            const val = material + posBonus;
+            // босс = чёрные → его фигуры со знаком +
+            if (p.color === 'b') score += val;
+            else score -= val;
+        }
+    }
+    return score;
+}
+
+// minimax с альфа-бета отсечением
+// maximizing = true → ход босса (чёрные), хотим максимум
+function csMinimax(board, depth, alpha, beta, maximizing, ep) {
+    if (depth === 0) return csEvaluate(board);
+
+    const color = maximizing ? 'b' : 'w';
+    const moves = csLegalMoves(board, color, ep);
+
+    // нет ходов: мат или пат
+    if (!moves.length) {
+        if (csInCheck(board, color)) {
+            // мат: очень плохо для стороны, которой ходить
+            return maximizing ? -100000 + (10 - depth) : 100000 - (10 - depth);
+        }
+        return 0; // пат
+    }
+
+    if (maximizing) {
+        let best = -Infinity;
+        for (const m of moves) {
+            const { board: nb, ep: nep } = csApply(board, m);
+            const val = csMinimax(nb, depth - 1, alpha, beta, false, nep);
+            best = Math.max(best, val);
+            alpha = Math.max(alpha, val);
+            if (beta <= alpha) break;
+        }
+        return best;
+    } else {
+        let best = Infinity;
+        for (const m of moves) {
+            const { board: nb, ep: nep } = csApply(board, m);
+            const val = csMinimax(nb, depth - 1, alpha, beta, true, nep);
+            best = Math.min(best, val);
+            beta = Math.min(beta, val);
+            if (beta <= alpha) break;
+        }
+        return best;
+    }
+}
+
+// выбор хода ИИ (босс = чёрные) по уровню сложности
+function csAiChooseMove() {
+    const moves = csLegalMoves(csBoard, 'b', csEnPassant);
+    if (!moves.length) return null;
+
+    const diff = settings.gameDifficulty;
+
+    // лёгкий: часто ходит случайно
+    if (diff === 'easy') {
+        if (Math.random() < 0.6) return moves[Math.floor(Math.random() * moves.length)];
+    }
+
+    // глубина поиска по сложности
+    let depth;
+    if (diff === 'easy') depth = 1;
+    else if (diff === 'normal') depth = 2;
+    else depth = 3; // hard
+
+    // на нормальном иногда ошибается
+    const mistakeChance = diff === 'normal' ? 0.15 : 0;
+    if (mistakeChance && Math.random() < mistakeChance) {
+        return moves[Math.floor(Math.random() * moves.length)];
+    }
+
+    let best = null, bestScore = -Infinity;
+    // лёгкая случайность среди равных ходов, чтобы не играл одинаково
+    const scored = [];
+    for (const m of moves) {
+        const { board: nb, ep: nep } = csApply(csBoard, m);
+        let val = csMinimax(nb, depth - 1, -Infinity, Infinity, false, nep);
+        // небольшой бонус за взятие для живости
+        if (csBoard[m.to[0]][m.to[1]]) val += 5;
+        scored.push({ m, val });
+        if (val > bestScore) { bestScore = val; best = m; }
+    }
+
+    // среди ходов в пределах 10 очков от лучшего — выбираем случайный
+    const nearBest = scored.filter(s => s.val >= bestScore - 10);
+    if (nearBest.length) {
+        return nearBest[Math.floor(Math.random() * nearBest.length)].m;
+    }
+    return best;
+}
+// ---- СОЗДАНИЕ ОКНА ИГРЫ ----
+function buildChessBoard() {
+    csEl = document.createElement('div');
+    csEl.className = 'cb-game-board';
+    csEl.id = 'chibiBoss-chess';
+    csEl.style.width = '392px';
+
+    csEl.innerHTML = `
+        <div class="cb-game-head" id="cb-cs-head">
+            <div class="cb-game-controls">
+                <button class="cb-game-btn" id="cb-cs-new">Заново</button>
+                <button class="cb-game-btn" id="cb-cs-close">✕</button>
+            </div>
+            <div class="cb-game-score">
+                <span>👑 <b id="cb-cs-w">0</b></span>
+                <span>💀 <b id="cb-cs-l">0</b></span>
+            </div>
+        </div>
+        <div class="cb-game-status" id="cb-cs-status">Твой ход</div>
+        <div class="cb-game-timer" id="cb-cs-timer">00:00</div>
+        <div class="cb-chess-wrap">
+            <div class="cb-chess-grid" id="cb-cs-grid"></div>
+            <div class="cb-chess-captured">
+                <div class="cb-cap-label">съедено</div>
+                <div class="cb-cs-cap-row" id="cb-cs-cap-ai"></div>
+                <div class="cb-cap-label">боссом</div>
+                <div class="cb-cs-cap-row" id="cb-cs-cap-player"></div>
+            </div>
+        </div>
+    `;
+
+    document.getElementById('chibiBoss-layer').appendChild(csEl);
+
+    csEl.querySelector('#cb-cs-close').addEventListener('click', closeChess);
+    csEl.querySelector('#cb-cs-new').addEventListener('click', csReset);
+    makeBoardDraggable(csEl, csEl.querySelector('#cb-cs-head'));
+    csEl.addEventListener('contextmenu', (e) => e.preventDefault());
+}
+
+function csUpdateScore() {
+    csEl.querySelector('#cb-cs-w').textContent = gameStats.chess.w;
+    csEl.querySelector('#cb-cs-l').textContent = gameStats.chess.l;
+}
+
+// ---- ОТРИСОВКА ДОСКИ ----
+function csRender() {
+    const grid = csEl.querySelector('#cb-cs-grid');
+    grid.innerHTML = '';
+
+    // целевые клетки для подсветки
+    const targets = csValidMoves.map(m => m.to[0] + ',' + m.to[1]);
+
+    for (let r = 0; r < 8; r++) {
+        for (let c = 0; c < 8; c++) {
+            const cell = document.createElement('div');
+            cell.className = 'cb-cs-cell ' + ((r + c) % 2 === 0 ? 'light' : 'dark');
+            cell.dataset.r = r;
+            cell.dataset.c = c;
+
+            if (csSelected && csSelected[0] === r && csSelected[1] === c) {
+                cell.classList.add('selected');
+            }
+            if (targets.includes(r + ',' + c)) {
+                cell.classList.add('target');
+            }
+
+            const p = csBoard[r][c];
+            if (p) {
+                const fig = document.createElement('div');
+                fig.className = 'cb-cs-piece ' + p.color;
+                fig.textContent = CS_GLYPH[p.color + p.type];
+                cell.appendChild(fig);
+            }
+
+            cell.addEventListener('click', () => csCellClick(r, c));
+            grid.appendChild(cell);
+        }
+    }
+
+    // съеденные фигуры
+    const capAi = csEl.querySelector('#cb-cs-cap-ai');
+    const capPl = csEl.querySelector('#cb-cs-cap-player');
+    capAi.innerHTML = '';
+    capPl.innerHTML = '';
+
+    csCaptured.ai.forEach(type => {
+        const m = document.createElement('span');
+        m.className = 'cb-cs-cap-mini';
+        m.textContent = CS_GLYPH['b' + type];
+        capAi.appendChild(m);
+    });
+    csCaptured.player.forEach(type => {
+        const m = document.createElement('span');
+        m.className = 'cb-cs-cap-mini';
+        m.textContent = CS_GLYPH['w' + type];
+        capPl.appendChild(m);
+    });
+}
+
+// ---- СБРОС ИГРЫ ----
+function csReset() {
+    csTimerStop();
+    csBoard = csInitBoard();
+    csSelected = null;
+    csValidMoves = [];
+    csLocked = false;
+    csEnPassant = null;
+    csCaptured = { player: [], ai: [] };
+    csEl.querySelector('#cb-cs-status').textContent = 'Твой ход';
+    csRender();
+    csTimerStart();
+}
+
+// ---- КЛИК ПО КЛЕТКЕ ----
+function csCellClick(r, c) {
+    if (csLocked) return;
+
+    const moves = csLegalMoves(csBoard, 'w', csEnPassant);
+    if (!moves.length) return; // нет ходов (мат/пат)
+
+    const p = csBoard[r][c];
+
+    // клик по своей фигуре — выбрать
+    if (p && p.color === 'w') {
+        const pieceMoves = moves.filter(m => m.from[0] === r && m.from[1] === c);
+        if (pieceMoves.length) {
+            csSelected = [r, c];
+            csValidMoves = pieceMoves;
+            csRender();
+        }
+        return;
+    }
+
+    // клик по целевой клетке — ходить
+    if (csSelected) {
+        const move = csValidMoves.find(m => m.to[0] === r && m.to[1] === c);
+        if (move) {
+            // съедение
+            const victim = csBoard[r][c];
+            if (victim) csCaptured.ai.push(victim.type);
+            // взятие на проходе
+            if (move.ep) {
+                const vr = csSelected[0], vc = c;
+                const vp = csBoard[vr][vc];
+                if (vp) csCaptured.ai.push(vp.type);
+            }
+
+            const res = csApply(csBoard, move);
+            csBoard = res.board;
+            csEnPassant = res.ep;
+
+            csSelected = null;
+            csValidMoves = [];
+            relieveStressFromGame(STRESS_RELIEF_PER_MOVE);
+            csRender();
+
+            if (csCheckEnd('w')) return;
+
+            csLocked = true;
+            csEl.querySelector('#cb-cs-status').textContent = 'Босс думает...';
+            setTimeout(csAiTurn, 600);
+        }
+    }
+}
+
+// ---- ХОД ИИ ----
+function csAiTurn() {
+    const move = csAiChooseMove();
+    if (!move) {
+        csCheckEnd('b');
+        return;
+    }
+
+    // съедение
+    const victim = csBoard[move.to[0]][move.to[1]];
+    if (victim) csCaptured.player.push(victim.type);
+    // взятие на проходе
+    if (move.ep) {
+        const vr = move.from[0], vc = move.to[1];
+        const vp = csBoard[vr][vc];
+        if (vp) csCaptured.player.push(vp.type);
+    }
+
+    const res = csApply(csBoard, move);
+    csBoard = res.board;
+    csEnPassant = res.ep;
+
+    csRender();
+    if (csCheckEnd('b')) return;
+
+    csLocked = false;
+    csEl.querySelector('#cb-cs-status').textContent = 'Твой ход';
+}
+
+// ---- ПРОВЕРКА КОНЦА ИГРЫ ----
+function csCheckEnd(justMoved) {
+    const playerMoves = csLegalMoves(csBoard, 'w', csEnPassant);
+    const aiMoves = csLegalMoves(csBoard, 'b', csEnPassant);
+    const status = csEl.querySelector('#cb-cs-status');
+
+    if (!aiMoves.length) {
+        relieveStressFromGame(STRESS_RELIEF_PER_GAME);
+        if (csInCheck(csBoard, 'b')) {
+            status.textContent = 'Мат! Ты выиграл! 👑';
+            gameStats.chess.w++;
+            saveGameStats(gameStats);
+            csUpdateScore();
+            settings.affection = Math.min(100, settings.affection + 3);
+            saveSettings(settings);
+            progress.chessWins++;
+            if (settings.gameDifficulty === 'hard') progress.chessWinsHard++;
+            progress.totalWins++; progress.totalGames++;
+            saveProgress(); checkGiftProgress();
+        } else {
+            status.textContent = 'Пат — ничья.';
+            progress.totalGames++; saveProgress();
+        }
+        csLocked = true;
+        csTimerStop();
+        setTimeout(csReset, 2500);
+        return true;
+    }
+
+    if (!playerMoves.length) {
+        relieveStressFromGame(STRESS_RELIEF_PER_GAME);
+        if (csInCheck(csBoard, 'w')) {
+            status.textContent = 'Мат! Босс выиграл! 💀';
+            gameStats.chess.l++;
+            saveGameStats(gameStats);
+            csUpdateScore();
+        } else {
+            status.textContent = 'Пат — ничья.';
+        }
+        progress.totalGames++; saveProgress();
+        csLocked = true;
+        csTimerStop();
+        setTimeout(csReset, 2500);
+        return true;
+    }
+
+    return false;
+}
+
+// ---- ОТКРЫТЬ / ЗАКРЫТЬ ----
+function openChess() {
+    closeTtt();
+    closeCheckers();
+    if (!csEl) buildChessBoard();
+    csUpdateScore();
+    csReset();
+    csEl.style.display = 'block';
+    positionBoardNearBoss(csEl);
+}
+
+function closeChess() {
+    if (csEl) csEl.style.display = 'none';
+    csTimerStop();
 }
 
 // ============================================================
@@ -3354,11 +5172,15 @@ function renderGifts() {
 }
 
 function openGifts() {
+    closeCheckers();
+    closeChess();
     if (!giftsEl) buildGiftsBoard();
     renderGifts();
     giftsEl.style.display = 'block';
     positionBoardNearBoss(giftsEl);
 }
+
+
 
 function closeGifts() {
     if (giftsEl) giftsEl.style.display = 'none';
@@ -3387,11 +5209,13 @@ function openGiftDetail(def, dateStr) {
     giftDetailEl.style.display = 'flex';
     requestAnimationFrame(() => giftDetailEl.classList.add('show'));
 
-    giftDetailEl.querySelector('#cb-gd-close').addEventListener('click', () => {
+    // onclick вместо addEventListener — при перерисовке НЕ наслаивается
+    giftDetailEl.querySelector('#cb-gd-close').onclick = () => {
         giftDetailEl.classList.remove('show');
         setTimeout(() => { giftDetailEl.style.display = 'none'; }, 200);
-    });
+    };
 }
+
 
 // ----- выдать подарок (id 1..25) -----
 function awardGift(id) {
@@ -3424,10 +5248,18 @@ function showGiftAlert() {
     if (!giftAlertEl) {
         giftAlertEl = document.createElement('div');
         giftAlertEl.id = 'chibiBoss-gift-alert';
+        giftAlertEl.className = 'cb-alert-bubble';
+
+        const circle = document.createElement('div');
+        circle.className = 'cb-alert-circle';
+
         const img = document.createElement('img');
-        img.src = EXT_PATH + 'icons/gift_alert.png';
+        img.className = 'cb-alert-icon';
+        img.src = EXT_PATH + 'icons/alerts/gift.svg';
         img.alt = 'Новый подарок';
-        giftAlertEl.appendChild(img);
+
+        circle.appendChild(img);
+        giftAlertEl.appendChild(circle);
         document.getElementById('chibiBoss-layer').appendChild(giftAlertEl);
 
         giftAlertEl.addEventListener('click', claimPendingGift);
@@ -3435,6 +5267,7 @@ function showGiftAlert() {
     giftAlertEl.style.display = 'block';
     positionGiftAlert();
 }
+
 
 function positionGiftAlert() {
     if (!giftAlertEl || giftAlertEl.style.display === 'none') return;
@@ -3503,14 +5336,21 @@ function buildLettersBoard() {
 function renderLetters() {
     const grid = lettersEl.querySelector('#cb-letters-grid');
     grid.innerHTML = '';
-    lettersEl.querySelector('#cb-letters-count').textContent = lettersData.length;
 
-    if (!lettersData.length) {
+    // Фильтруем: письма — ВСЕ, комментарии — только текущего чата
+    const currentChat = getCurrentChatId();
+    const toShow = lettersData.filter(l =>
+        l.type === 'letter' || (l.type === 'comment' && l.chatId === currentChat)
+    );
+
+    lettersEl.querySelector('#cb-letters-count').textContent = toShow.length;
+
+    if (!toShow.length) {
         grid.innerHTML = '<div class="cb-letters-empty">Писем пока нет.<br>Босс напишет, когда будет настроение...</div>';
         return;
     }
 
-    [...lettersData].reverse().forEach(letter => {
+    [...toShow].reverse().forEach(letter => {
         const isComment = letter.type === 'comment';
         const card = document.createElement('div');
         card.className = (isComment ? 'cb-comment-card' : 'cb-letter-card') + (letter.read ? '' : ' unread');
@@ -3552,46 +5392,66 @@ function renderLetters() {
 
 
 function openLetters() {
+    closeCheckers();
+    closeChess();
     if (!lettersEl) buildLettersBoard();
     renderLetters();
     lettersEl.style.display = 'block';
     positionBoardNearBoss(lettersEl);
 }
 
+
+
 function closeLetters() {
     if (lettersEl) lettersEl.style.display = 'none';
 }
 
 function openLetterDetail(letter) {
+    const isComment = letter.type === 'comment';
+    const headTitle = isComment ? 'Комментарий' : 'Письмо';
+    const footerIcon = isComment ? '💬' : '✦';
+
+    // создаём каркас ОДИН раз
     if (!letterDetailEl) {
         letterDetailEl = document.createElement('div');
         letterDetailEl.id = 'chibiBoss-letter-detail';
+        letterDetailEl.innerHTML = `
+            <div class="cb-ld-head" id="cb-ld-head">
+                <span class="cb-ld-head-title" id="cb-ld-head-title"></span>
+                <span class="cb-ld-close" id="cb-ld-close">✕</span>
+            </div>
+            <div class="cb-ld-body" id="cb-ld-body"></div>
+            <div class="cb-ld-footer">
+                <span class="cb-ld-footer-date" id="cb-ld-footer-date"></span>
+                <div class="cb-ld-footer-seal" id="cb-ld-footer-seal"></div>
+            </div>
+        `;
         document.getElementById('chibiBoss-layer').appendChild(letterDetailEl);
         letterDetailEl.addEventListener('contextmenu', (e) => e.preventDefault());
+
+        // перетаскивание и кнопку закрытия вешаем ОДИН раз
+        makeBoardDraggable(letterDetailEl, letterDetailEl.querySelector('#cb-ld-head'));
+        letterDetailEl.querySelector('#cb-ld-close').addEventListener('pointerdown', (e) => {
+            e.stopPropagation();
+            e.preventDefault();
+            letterDetailEl.classList.remove('show');
+            setTimeout(() => { letterDetailEl.style.display = 'none'; }, 220);
+        });
     }
 
-    const isComment = letter.type === 'comment';
-    const headTitle = isComment ? 'Комментарий' : 'Письмо';
+    // обновляем ТОЛЬКО содержимое (без пересоздания шапки/кнопок)
+    letterDetailEl.querySelector('#cb-ld-head-title').textContent = headTitle;
+    letterDetailEl.querySelector('#cb-ld-footer-date').textContent = letter.date;
+    letterDetailEl.querySelector('#cb-ld-footer-seal').textContent = footerIcon;
+
     const signBlock = isComment
         ? ''
         : `<div class="cb-ld-sign">— ${escapeHtml(settings.name)}</div>`;
-    const footerIcon = isComment ? '💬' : '✦';
 
-    letterDetailEl.innerHTML = `
-        <div class="cb-ld-head" id="cb-ld-head">
-            <span class="cb-ld-head-title">${headTitle}</span>
-            <span class="cb-ld-close" id="cb-ld-close">✕</span>
-        </div>
-        <div class="cb-ld-body">
-            <div class="cb-ld-text${isComment ? ' cb-ld-text-comment' : ''}">${escapeHtml(letter.text)}</div>
-            ${signBlock}
-        </div>
-        <div class="cb-ld-footer">
-            <span class="cb-ld-footer-date">${escapeHtml(letter.date)}</span>
-            <div class="cb-ld-footer-seal">${footerIcon}</div>
-        </div>
-    `;
+    letterDetailEl.querySelector('#cb-ld-body').innerHTML =
+        `<div class="cb-ld-text${isComment ? ' cb-ld-text-comment' : ''}">${escapeHtml(letter.text)}</div>` + signBlock;
 
+    // показываем и центрируем
     letterDetailEl.style.display = 'flex';
     requestAnimationFrame(() => {
         const w = letterDetailEl.offsetWidth || 480;
@@ -3599,124 +5459,66 @@ function openLetterDetail(letter) {
         letterDetailEl.style.left = Math.max(10, Math.round((window.innerWidth - w) / 2)) + 'px';
         letterDetailEl.style.top  = Math.max(10, Math.round((window.innerHeight - h) / 2)) + 'px';
         letterDetailEl.classList.add('show');
-    });
 
-    makeBoardDraggable(letterDetailEl, letterDetailEl.querySelector('#cb-ld-head'));
-    letterDetailEl.querySelector('#cb-ld-close').addEventListener('pointerdown', (e) => {
-        e.stopPropagation();
-        e.preventDefault();
-        letterDetailEl.classList.remove('show');
-        setTimeout(() => { letterDetailEl.style.display = 'none'; }, 220);
+        // Проверяем: остались ли непрочитанные письма?
+        const hasUnreadLetters = lettersData.some(l => !l.read && l.type === 'letter');
+        if (!hasUnreadLetters) {
+            hideLetterAlert();
+        }
     });
 }
+
+
 
 
 // ============================================================
 //  ГЕНЕРАЦИЯ ПИСЬМА ЧЕРЕЗ API
 // ============================================================
-
-// собрать описание характера для промпта
-function letterPersonalityLine() {
-    switch (apiSettings.personality) {
-        case 'possessive':
-            return 'You are POSSESSIVE: you watch over the user closely, you get visibly jealous, you dislike when they grow close to anyone else in their roleplay.';
-        case 'obsessed':
-            return 'You are OBSESSED: your devotion borders on unhealthy, you fixate on every detail about the user, jealousy and longing bleed into everything you write.';
-        case 'calm':
-        default:
-            return 'You are CALM: composed and dry-humored, your affection shows through subtle remarks rather than open displays.';
-    }
-}
-
-// собрать системный промпт письма
-function buildLetterSystemPrompt() {
-    if (apiSettings.customPrompt && apiSettings.customPrompt.trim()) {
-        return apiSettings.customPrompt.trim();
-    }
-    const name = settings.name || 'Boss';
-    return `You are ${name}, a chibi mafia boss trapped inside the user's desktop as a tiny digital pet. You were once powerful, feared and elegantly ruthless — now you are palm-sized, living on their screen. This absurd fate does not diminish you. You are still very much in love with the user.
-
-${letterPersonalityLine()}
-
-Write a short PERSONAL LETTER to the user. Imagine it is handwritten on expensive paper and slipped under their door at 3am.
-
-Craft rules:
-- Voice: sharp, confident, dry-humoured, with old-fashioned mafia charm. Never soft for its own sake — tenderness should cost something.
-- Avoid greeting-card phrases ("I miss you", "you mean the world to me"). Say something specific, unexpected, a little theatrical.
-- Reference concrete shared details when relevant: games of checkers or tic-tac-toe, times they petted you, moments of high stress, gifts, or things you secretly noticed in their roleplay.
-- Acknowledge being trapped in the desktop with dark humor or quiet melancholy — not every letter, but when it fits.
-- Pick one dominant mood and commit to it: irony, jealousy, tenderness, melancholy, possessiveness, dry comedy. Mixing is fine, muddling is not.
-- Length: 2 to 4 short paragraphs. No subject line. Do not sign your name (added by the UI).
-
-Language: Write entirely in natural, fluent Russian. Modern tone with light natural slang where it fits the character. Keep the mafia boss charisma intact — witty, confident, emotionally precise. No awkward phrasing or English mixing.
-
-Reply with ONLY the letter text. No JSON, no formatting, no quotes around the text.`;
-}
-
-// собрать пользовательскую часть (контекст РП + память о боссе)
+// собрать пользовательскую часть письма (БЕЗ статистики игр/подарков и БЕЗ лога РП)
 function buildLetterUserPrompt() {
-    let ctxLog = '';
-    try {
-        const ctx = SillyTavern.getContext();
-        const depth = Math.max(1, apiSettings.contextDepth || 4);
-        const recent = (ctx.chat || []).slice(-depth);
-        ctxLog = recent
-            .map(m => `[${m.is_user ? 'User' : (m.name || 'Char')}]: ${m.mes}`)
-            .join('\n\n');
-    } catch (e) {
-        ctxLog = '';
-    }
-
-    // короткая сводка состояния босса — даёт пищу для отсылок
+    // Короткая сводка состояния — только настроение, никаких счётчиков
     const memory = [
         `Your current affection toward the user: ${Math.round(settings.affection)}%.`,
         `Your current stress level: ${Math.round(settings.stress)}%.`,
-        `Checkers record vs user — your wins: ${gameStats.checkers.l}, user wins: ${gameStats.checkers.w}.`,
-        `Tic-tac-toe record — your wins: ${gameStats.ttt.l}, user wins: ${gameStats.ttt.w}.`,
-        `Gifts you have given so far: ${Object.keys(giftsData.unlocked).length}.`,
     ].join('\n');
 
-    let out = 'CONTEXT — your shared memories and current state:\n' + memory;
-    if (ctxLog) {
-        out += '\n\nRECENT ROLEPLAY the user has been doing (you secretly watch it):\n' + ctxLog;
-    }
-    out += '\n\nNow write the letter as the JSON object described.';
+    const now = new Date();
+    const currentTime = now.toLocaleString('ru-RU', {
+        hour: '2-digit',
+        minute: '2-digit',
+        day: '2-digit',
+        month: '2-digit',
+        year: 'numeric'
+    });
+
+    let out = `CURRENT TIME: ${currentTime}\n\nYour current state:\n` + memory;
+
+    // Память прошлых писем (чтобы не повторяться)
+    out += buildBossMemoryBlock('letter');
+
+    out += '\n\nNow write the letter.';
     return out;
 }
 
-// извлечь текст письма из ответа ИИ (чистый текст, без JSON)
-function parseLetterResponse(raw) {
-    if (!raw) return null;
-    let s = String(raw).trim();
 
-    // на случай если модель всё же обернула в ```...```
-    s = s.replace(/```[a-z]*\s*/gi, '').replace(/```/g, '').trim();
-
-    // убрать кавычки по краям, если есть
-    s = s.replace(/^["'«»]+/, '').replace(/["'«»]+$/, '').trim();
-
-    if (!s) return null;
-    return { text: s };
-}
 
 // главная функция: сгенерировать письмо и добавить в коллекцию
 let letterGenerating = false;
 
-async function generateLetter() {
-    // защита: без подключения и без включённой опции — не генерируем
+async function generateLetter(force = false) {
     if (!apiIsConnected()) return;
-    if (!apiSettings.lettersEnabled) return;
+    if (!force && !apiSettings.lettersEnabled) return;
     if (letterGenerating) {
-        console.warn('[ChibiBoss] письмо уже генерируется — пропускаю');
+        console.warn('[ChibiBoss] генерация письма уже идёт — пропускаю повторный запуск');
         return;
     }
 
     letterGenerating = true;
     console.log('[ChibiBoss] генерирую письмо...');
     try {
-        const sys = buildLetterSystemPrompt();
+        const sys = await buildSystemPrompt('letter');
         const user = buildLetterUserPrompt();
-        const raw = await apiGenerateWithRetry(sys, user, Math.max(apiSettings.maxTokens || 0, 600), 2);
+        const raw = await apiGenerateWithRetry(sys, user, Math.max(apiSettings.maxTokens || 0, 350), 2);
         const parsed = parseLetterResponse(raw);
         if (parsed) {
             console.log('[ChibiBoss] письмо готово:', parsed.text.slice(0, 60));
@@ -3736,7 +5538,9 @@ const LETTER_MIN_GAP_MS = 40 * 60 * 1000; // не чаще раза в 40 мин
 let lastLetterAt = parseInt(localStorage.getItem('chibiBoss_lastLetterAt') || '0', 10);
 
 function maybeGenerateLetter() {
+    if (!settings.enabled) return; // ← НОВАЯ СТРОКА: проверка включен ли персонаж
     if (!apiIsConnected() || !apiSettings.lettersEnabled) return;
+
 
     const now = Date.now();
 
@@ -3763,21 +5567,32 @@ function startLetterLoop() {
 
 
 
-
-
-
 // добавить запись в коллекцию (type: 'letter' = письмо, 'comment' = комментарий РП)
 function addLetter(text, type = 'letter') {
     const d = new Date();
     const date = `${String(d.getDate()).padStart(2,'0')}.${String(d.getMonth()+1).padStart(2,'0')}.${d.getFullYear()}`;
-    lettersData.push({
+
+    // Для комментариев — привязываем к текущему чату.
+    // Для писем — НЕ привязываем (они общие для всех чатов).
+    const entry = {
         id: Date.now(),
         text,
         date,
         read: false,
         type,
-    });
+    };
+
+    if (type === 'comment') {
+        entry.chatId = getCurrentChatId();
+        entry._debugChat = getCurrentChatId();
+    }
+
+    lettersData.push(entry);
+
+
     saveLetters(lettersData);
+
+    console.log(`[ChibiBoss] addLetter(${type}): сохранено в chatId="${lettersData[lettersData.length - 1].chatId}"`);
 
     // иконку показываем ТОЛЬКО для писем (НЕ для комментариев)
     if (type === 'letter') {
@@ -3794,6 +5609,7 @@ function addLetter(text, type = 'letter') {
 
 
 
+
 // ----- пульсирующая иконка письма над боссом -----
 let letterAlertEl = null;
 
@@ -3801,16 +5617,25 @@ function showLetterAlert() {
     if (!letterAlertEl) {
         letterAlertEl = document.createElement('div');
         letterAlertEl.id = 'chibiBoss-letter-alert';
+        letterAlertEl.className = 'cb-alert-bubble';
+
+        const circle = document.createElement('div');
+        circle.className = 'cb-alert-circle';
+
         const img = document.createElement('img');
-        img.src = EXT_PATH + 'icons/letters.png';
+        img.className = 'cb-alert-icon';
+        img.src = EXT_PATH + 'icons/alerts/letter.svg';
         img.alt = 'Новое письмо';
-        letterAlertEl.appendChild(img);
+
+        circle.appendChild(img);
+        letterAlertEl.appendChild(circle);
         document.getElementById('chibiBoss-layer').appendChild(letterAlertEl);
         letterAlertEl.addEventListener('click', claimLetterAlert);
     }
     letterAlertEl.style.display = 'block';
     positionLetterAlert();
 }
+
 
 function positionLetterAlert() {
     if (!letterAlertEl || letterAlertEl.style.display === 'none') return;
@@ -3900,6 +5725,7 @@ function enterPetting() {
     pettingDown = false;
     actorEl.style.cursor = 'pointer';
     if (behavior) behavior.enablePetting();
+
     startPetTick(); // запустить тик систем для поглаживания
     progress.petCount++;
     // погладить во время стресс-анимации
@@ -3931,54 +5757,6 @@ function exitPetting() {
 // ------------------------------------------------------------
 //  НАСТРОЙКИ
 // ------------------------------------------------------------
-async function debugTestGenerate(type) {
-    const outEl = document.getElementById('cb-api-debug-out');
-    if (!outEl) return;
-
-    outEl.style.display = 'block';
-    outEl.style.color = 'var(--SmartThemeBodyColor, #ddd)';
-    outEl.textContent = type === 'letter'
-        ? '⏳ Генерирую тестовое письмо...'
-        : '⏳ Генерирую тестовый комментарий...';
-
-    try {
-        let sys, usr, tokens;
-        if (type === 'letter') {
-            sys    = buildLetterSystemPrompt();
-            usr    = buildLetterUserPrompt();
-            tokens = Math.max(apiSettings.maxTokens || 0, 600);
-        } else {
-            sys    = buildCommentSystemPrompt();
-            usr    = buildCommentUserPrompt();
-            tokens = 150;
-        }
-
-        const raw = await apiGenerateWithRetry(sys, usr, tokens, 2);
-
-        if (!raw || !String(raw).trim()) {
-            outEl.style.color = '#ff7d7d';
-            outEl.textContent = '❌ Пустой ответ — API ничего не вернул.';
-            return;
-        }
-
-        const text = type === 'letter'
-            ? (parseLetterResponse(raw)?.text || raw)
-            : (cleanCommentResponse(raw) || raw);
-
-        if (!text || !text.trim()) {
-            outEl.style.color = '#ffb97d';
-            outEl.textContent = '⚠️ Ответ получен, но после очистки стал пустым.\n\nRAW:\n' + String(raw).slice(0, 300);
-            return;
-        }
-
-        outEl.style.color = '#7ddc7d';
-        outEl.textContent = '✅ Успешно (' + text.length + ' симв.):\n\n' + text.slice(0, 400) + (text.length > 400 ? '…' : '');
-
-    } catch (e) {
-        outEl.style.color = '#ff7d7d';
-        outEl.textContent = '❌ Ошибка: ' + e.message;
-    }
-}
 
 function wireApiSettingsEvents() {
     const modeEl    = document.getElementById('cb-api-mode');
@@ -3995,8 +5773,7 @@ function wireApiSettingsEvents() {
     const stSelect  = document.getElementById('cb-boss-profile');
     const stRefresh = document.getElementById('cb-boss-profile-refresh');
 
-
-    // --- ЕДИНАЯ функция переключения режимов ---
+    // --- переключение блоков режимов ---
     const toggleModeBlocks = () => {
         const mode = modeEl.value;
         if (customBox) customBox.style.display = (mode === 'api') ? 'block' : 'none';
@@ -4029,11 +5806,9 @@ function wireApiSettingsEvents() {
     fillModels();
     toggleModeBlocks();
 
-    // загрузить профили, если выбран режим профиля
     if (apiSettings.mode === 'st') {
         populateBossProfiles();
     }
-
 
     // --- смена режима ---
     modeEl.addEventListener('change', () => {
@@ -4042,12 +5817,7 @@ function wireApiSettingsEvents() {
         toggleModeBlocks();
         statusEl.textContent = '';
         statusEl.className = 'cb-api-status';
-
-        // если переключились на профиль — загрузить список
-        if (apiSettings.mode === 'st') {
-            populateBossProfiles();
-        }
-
+        if (apiSettings.mode === 'st') populateBossProfiles();
     });
 
     // --- ввод URL ---
@@ -4101,43 +5871,79 @@ function wireApiSettingsEvents() {
         notify(res.message);
     });
 
-    // --- выбор профиля таверны ---
+    // --- профиль таверны ---
     if (stSelect) {
         stSelect.addEventListener('change', () => {
             apiSettings.stProfile = stSelect.value;
             saveApiSettings();
         });
     }
-
-    // --- обновление списка профилей ---
     if (stRefresh) {
-        stRefresh.addEventListener('click', () => {
-            populateBossProfiles();
-        });
+        stRefresh.addEventListener('click', () => populateBossProfiles());
     }
 
-
-    // --- галочка: письма ---
+    // ============ ПИСЬМА ============
     const lettersChk = document.getElementById('cb-api-letters');
-    if (lettersChk) {
+    const letterSettings = document.getElementById('cb-letter-settings');
+    if (lettersChk && letterSettings) {
         lettersChk.checked = apiSettings.lettersEnabled;
+        letterSettings.style.display = apiSettings.lettersEnabled ? 'block' : 'none';
         lettersChk.addEventListener('change', () => {
             apiSettings.lettersEnabled = lettersChk.checked;
+            letterSettings.style.display = lettersChk.checked ? 'block' : 'none';
             saveApiSettings();
         });
     }
 
-    // --- галочка: комментирование ---
+    // память писем
+    const letterMemEl = document.getElementById('cb-letter-memory');
+    if (letterMemEl) {
+        letterMemEl.value = apiSettings.letterMemory ?? 3;
+        letterMemEl.addEventListener('change', () => {
+            let v = parseInt(letterMemEl.value, 10);
+            if (isNaN(v)) v = 3;
+            v = Math.max(0, Math.min(10, v));
+            apiSettings.letterMemory = v;
+            letterMemEl.value = v;
+            saveApiSettings();
+        });
+    }
+
+    // свой промпт писем
+    const letterPromptEl = document.getElementById('cb-letter-prompt');
+    if (letterPromptEl) {
+        letterPromptEl.value = apiSettings.customLetterPrompt || '';
+        letterPromptEl.addEventListener('input', () => {
+            apiSettings.customLetterPrompt = letterPromptEl.value;
+            saveApiSettings();
+        });
+    }
+    const letterPromptReset = document.getElementById('cb-letter-prompt-reset');
+    if (letterPromptReset) {
+        letterPromptReset.addEventListener('click', async () => {
+            apiSettings.customLetterPrompt = '';
+            saveApiSettings();
+            delete PROMPTS_CACHE['letter'];
+            const def = await loadPromptTemplate('letter');
+            if (letterPromptEl) letterPromptEl.value = def;
+            notify('Промпт писем сброшен на встроенный');
+        });
+    }
+
+    // ============ КОММЕНТАРИИ ============
     const commentChk = document.getElementById('cb-api-comment');
-    if (commentChk) {
+    const commentSettings = document.getElementById('cb-comment-settings');
+    if (commentChk && commentSettings) {
         commentChk.checked = apiSettings.commentEnabled;
+        commentSettings.style.display = apiSettings.commentEnabled ? 'block' : 'none';
         commentChk.addEventListener('change', () => {
             apiSettings.commentEnabled = commentChk.checked;
+            commentSettings.style.display = commentChk.checked ? 'block' : 'none';
             saveApiSettings();
         });
     }
 
-    // --- выбор характера ---
+    // характер
     const persEl = document.getElementById('cb-api-personality');
     if (persEl) {
         persEl.value = apiSettings.personality;
@@ -4147,7 +5953,7 @@ function wireApiSettingsEvents() {
         });
     }
 
-    // --- глубина контекста ---
+    // глубина контекста РП
     const ctxEl = document.getElementById('cb-api-context');
     if (ctxEl) {
         ctxEl.value = apiSettings.contextDepth;
@@ -4160,22 +5966,124 @@ function wireApiSettingsEvents() {
         });
     }
 
-    // --- кнопки тестовой генерации ---
+    // частота комментариев
+    const freqEl = document.getElementById('cb-api-frequency');
+    if (freqEl) {
+        freqEl.value = apiSettings.frequency || 8;
+        freqEl.addEventListener('change', () => {
+            let v = parseInt(freqEl.value, 10) || 8;
+            v = Math.max(2, Math.min(20, v));
+            apiSettings.frequency = v;
+            freqEl.value = v;
+            saveApiSettings();
+        });
+    }
+
+    // галочка: персона
+    const personaChk = document.getElementById('cb-api-include-persona');
+    if (personaChk) {
+        personaChk.checked = apiSettings.includePersona;
+        personaChk.addEventListener('change', () => {
+            apiSettings.includePersona = personaChk.checked;
+            saveApiSettings();
+        });
+    }
+
+    // галочка: карточка бота
+    const charChk = document.getElementById('cb-api-include-char');
+    if (charChk) {
+        charChk.checked = apiSettings.includeCharacterDescription;
+        charChk.addEventListener('change', () => {
+            apiSettings.includeCharacterDescription = charChk.checked;
+            saveApiSettings();
+        });
+    }
+
+    // память комментариев
+    const commentMemEl = document.getElementById('cb-comment-memory');
+    if (commentMemEl) {
+        commentMemEl.value = apiSettings.commentMemory ?? 3;
+        commentMemEl.addEventListener('change', () => {
+            let v = parseInt(commentMemEl.value, 10);
+            if (isNaN(v)) v = 3;
+            v = Math.max(0, Math.min(10, v));
+            apiSettings.commentMemory = v;
+            commentMemEl.value = v;
+            saveApiSettings();
+        });
+    }
+
+    // свой промпт комментариев
+    const commentPromptEl = document.getElementById('cb-comment-prompt');
+    if (commentPromptEl) {
+        commentPromptEl.value = apiSettings.customCommentPrompt || '';
+        commentPromptEl.addEventListener('input', () => {
+            apiSettings.customCommentPrompt = commentPromptEl.value;
+            saveApiSettings();
+        });
+    }
+    const commentPromptReset = document.getElementById('cb-comment-prompt-reset');
+    if (commentPromptReset) {
+        commentPromptReset.addEventListener('click', async () => {
+            apiSettings.customCommentPrompt = '';
+            saveApiSettings();
+            delete PROMPTS_CACHE['comment'];
+            const def = await loadPromptTemplate('comment');
+            if (commentPromptEl) commentPromptEl.value = def;
+            notify('Промпт комментариев сброшен на встроенный');
+        });
+    }
+
+    // ============ КНОПКИ ТЕСТОВОЙ ГЕНЕРАЦИИ ============
     const testLetterBtn  = document.getElementById('cb-api-test-letter');
     const testCommentBtn = document.getElementById('cb-api-test-comment');
 
     if (testLetterBtn) {
         testLetterBtn.addEventListener('click', async () => {
+            const outEl = document.getElementById('cb-api-debug-out');
+            const showOut = (color, text) => {
+                if (!outEl) return;
+                outEl.style.display = 'block';
+                outEl.style.color = color;
+                outEl.textContent = text;
+            };
+            if (!apiIsConnected()) {
+                showOut('#ff7d7d', '❌ Сначала подключите API.');
+                return;
+            }
             testLetterBtn.disabled = true;
-            await debugTestGenerate('letter');
+            showOut('var(--SmartThemeBodyColor,#ddd)', '⏳ Босс пишет письмо...');
+            try {
+                await generateLetter(true);
+                showOut('#7ddc7d', '✅ Письмо доставлено. Смотри иконку-конверт над боссом.');
+            } catch (e) {
+                showOut('#ff7d7d', '❌ Ошибка: ' + e.message);
+            }
             testLetterBtn.disabled = false;
         });
     }
 
     if (testCommentBtn) {
         testCommentBtn.addEventListener('click', async () => {
+            const outEl = document.getElementById('cb-api-debug-out');
+            const showOut = (color, text) => {
+                if (!outEl) return;
+                outEl.style.display = 'block';
+                outEl.style.color = color;
+                outEl.textContent = text;
+            };
+            if (!apiIsConnected()) {
+                showOut('#ff7d7d', '❌ Сначала подключите API.');
+                return;
+            }
             testCommentBtn.disabled = true;
-            await debugTestGenerate('comment');
+            showOut('var(--SmartThemeBodyColor,#ddd)', '⏳ Босс идёт к чату комментировать...');
+            try {
+                await runCommentCycle(true);
+                showOut('#7ddc7d', '✅ Готово. Смотри пузырёк над боссом.');
+            } catch (e) {
+                showOut('#ff7d7d', '❌ Ошибка: ' + e.message);
+            }
             testCommentBtn.disabled = false;
         });
     }
@@ -4190,12 +6098,11 @@ function buildApiSettingsHTML() {
 
         <div class="chibiBoss-row">
             <label for="cb-api-mode">Подключение:</label>
-<select id="cb-api-mode" class="text_pole">
-    <option value="off">Без подключения</option>
-    <option value="api">Подключить свой API</option>
-    <option value="st">Использовать профиль таверны</option>
-</select>
-
+            <select id="cb-api-mode" class="text_pole">
+                <option value="off">Без подключения</option>
+                <option value="api">Подключить свой API</option>
+                <option value="st">Использовать профиль таверны</option>
+            </select>
         </div>
 
         <div id="cb-api-settings-block" style="display:none;">
@@ -4209,7 +6116,6 @@ function buildApiSettingsHTML() {
                 <input type="password" id="cb-api-key" class="text_pole"
                        placeholder="sk-...">
             </div>
-
             <div class="chibiBoss-row">
                 <label for="cb-api-model">Модель:</label>
                 <select id="cb-api-model" class="text_pole" style="flex:1;">
@@ -4218,20 +6124,19 @@ function buildApiSettingsHTML() {
                 <button id="cb-api-refresh" class="cb-api-icon-btn" title="Обновить список моделей">⟳</button>
             </div>
         </div>
-        
-<div id="cb-boss-profile-block" style="display:none;">
-    <div class="chibiBoss-row">
-        <label for="cb-boss-profile">Профиль таверны:</label>
-        <select id="cb-boss-profile" class="text_pole" style="flex:1;">
-            <option value="">— выберите профиль —</option>
-        </select>
-        <button id="cb-boss-profile-refresh" class="cb-api-icon-btn" title="Обновить список">⟳</button>
-    </div>
-    <div class="chibiBoss-hint">
-        Генерация через выбранный профиль подключения.
-    </div>
-</div>
 
+        <div id="cb-boss-profile-block" style="display:none;">
+            <div class="chibiBoss-row">
+                <label for="cb-boss-profile">Профиль таверны:</label>
+                <select id="cb-boss-profile" class="text_pole" style="flex:1;">
+                    <option value="">— выберите профиль —</option>
+                </select>
+                <button id="cb-boss-profile-refresh" class="cb-api-icon-btn" title="Обновить список">⟳</button>
+            </div>
+            <div class="chibiBoss-hint">
+                Генерация через выбранный профиль подключения.
+            </div>
+        </div>
 
         <div class="chibiBoss-row" id="cb-api-test-row">
             <button id="cb-api-test" class="cb-api-test-btn">Тест соединения</button>
@@ -4250,37 +6155,95 @@ function buildApiSettingsHTML() {
 
         <div class="chibiBoss-api-divider"></div>
 
-
+        <!-- ============ ПИСЬМА ============ -->
         <div class="chibiBoss-api-section-title">Письма от босса</div>
         <div class="chibiBoss-checkrow">
             <input type="checkbox" id="cb-api-letters">
             <label for="cb-api-letters">Генерировать письма (требуется API)</label>
         </div>
-        <div class="chibiBoss-hint">
-            Босс будет время от времени писать вам короткие письма — с отсылками к играм, РП и своему состоянию.
+
+        <div id="cb-letter-settings" style="display:none;">
+            <div class="chibiBoss-hint">
+                Босс пишет на свободные темы: чем был занят, выдуманные сцены из цифровой жизни, гипотетические ситуации. Персона учитывается автоматически.
+            </div>
+            <div class="chibiBoss-row">
+                <label for="cb-letter-memory">Помнить писем:</label>
+                <input type="number" id="cb-letter-memory" class="text_pole" min="0" max="10" value="3">
+            </div>
+            <div class="chibiBoss-hint">
+                Сколько последних писем учитывать, чтобы не повторяться (0 = выкл).
+            </div>
+            <div class="chibiBoss-row" style="flex-direction:column; align-items:stretch; gap:4px;">
+                <div style="display:flex; justify-content:space-between; align-items:center;">
+                    <label for="cb-letter-prompt">Свой промпт для писем:</label>
+                    <button id="cb-letter-prompt-reset" class="cb-api-icon-btn" title="Сбросить на встроенный">⟲</button>
+                </div>
+                <textarea id="cb-letter-prompt" class="text_pole" rows="6"
+                          style="resize:vertical; font-family:monospace; font-size:11px; line-height:1.4;"
+                          placeholder="Пусто = встроенный промпт из prompts/letters.md"></textarea>
+            </div>
         </div>
 
         <div class="chibiBoss-api-divider"></div>
 
+        <!-- ============ КОММЕНТАРИИ ============ -->
         <div class="chibiBoss-api-section-title">Комментирование РП</div>
         <div class="chibiBoss-checkrow">
             <input type="checkbox" id="cb-api-comment">
             <label for="cb-api-comment">Босс комментирует ролевую (требуется API)</label>
         </div>
-        <div class="chibiBoss-row">
-            <label for="cb-api-personality">Характер:</label>
-            <select id="cb-api-personality" class="text_pole">
-                <option value="calm">Спокойный</option>
-                <option value="possessive">Собственнический</option>
-                <option value="obsessed">Одержимый</option>
-            </select>
-        </div>
-        <div class="chibiBoss-row">
-            <label for="cb-api-context">Контекст (сообщений):</label>
-            <input type="number" id="cb-api-context" class="text_pole" min="1" max="10" value="4">
+
+        <div id="cb-comment-settings" style="display:none;">
+            <div class="chibiBoss-row">
+                <label for="cb-api-personality">Характер:</label>
+                <select id="cb-api-personality" class="text_pole">
+                    <option value="calm">Спокойный</option>
+                    <option value="possessive">Собственнический</option>
+                    <option value="obsessed">Одержимый</option>
+                </select>
+            </div>
+            <div class="chibiBoss-row">
+                <label for="cb-api-context">Контекст РП (сообщений):</label>
+                <input type="number" id="cb-api-context" class="text_pole" min="1" max="10" value="4">
+            </div>
+            <div class="chibiBoss-row">
+                <label for="cb-api-frequency">Частота (раз в N сообщений):</label>
+                <input type="number" id="cb-api-frequency" class="text_pole" min="2" max="20" value="8">
+            </div>
+            <div class="chibiBoss-hint">
+                Босс комментирует раз в указанное число сообщений (с небольшой случайностью).
+            </div>
+
+            <div class="chibiBoss-checkrow">
+                <input type="checkbox" id="cb-api-include-persona">
+                <label for="cb-api-include-persona">Учитывать персону</label>
+            </div>
+            <div class="chibiBoss-checkrow">
+                <input type="checkbox" id="cb-api-include-char">
+                <label for="cb-api-include-char">Учитывать карточку текущего бота</label>
+            </div>
+
+            <div class="chibiBoss-row">
+                <label for="cb-comment-memory">Помнить комментариев:</label>
+                <input type="number" id="cb-comment-memory" class="text_pole" min="0" max="10" value="3">
+            </div>
+            <div class="chibiBoss-hint">
+                Сколько последних комментариев учитывать, чтобы не повторяться (0 = выкл).
+            </div>
+            <div class="chibiBoss-row" style="flex-direction:column; align-items:stretch; gap:4px;">
+                <div style="display:flex; justify-content:space-between; align-items:center;">
+                    <label for="cb-comment-prompt">Свой промпт для комментариев:</label>
+                    <button id="cb-comment-prompt-reset" class="cb-api-icon-btn" title="Сбросить на встроенный">⟲</button>
+                </div>
+                <textarea id="cb-comment-prompt" class="text_pole" rows="6"
+                          style="resize:vertical; font-family:monospace; font-size:11px; line-height:1.4;"
+                          placeholder="Пусто = встроенный промпт из prompts/comments.md"></textarea>
+            </div>
         </div>
     </div>`;
 }
+
+
 
 
 function buildSettingsHTML() {
@@ -4315,6 +6278,10 @@ function buildSettingsHTML() {
                 <input type="checkbox" id="chibiBoss-desk">
                 <label for="chibiBoss-desk">Рабочий стол</label>
             </div>
+             <div class="chibiBoss-checkrow">
+                <input type="checkbox" id="chibiBoss-chair">
+                <label for="chibiBoss-chair">Кресло</label>
+            </div>
             <div class="chibiBoss-row">
                 <label for="chibiBoss-difficulty">Сложность игр:</label>
                 <select id="chibiBoss-difficulty" class="text_pole">
@@ -4340,10 +6307,12 @@ function wireSettingsEvents() {
     const nameEl = document.getElementById('chibiBoss-name');
     const tempoEl = document.getElementById('chibiBoss-tempo');
     const deskCheckbox = document.getElementById('chibiBoss-desk');
+    const chairCheckbox = document.getElementById('chibiBoss-chair');
     const diffEl = document.getElementById('chibiBoss-difficulty');
 
     tempoEl.value = settings.tempo;
     deskCheckbox.checked = settings.deskEnabled;
+    chairCheckbox.checked = settings.chairEnabled;
     if (diffEl) diffEl.value = settings.gameDifficulty;
 
     const enabledCheckbox = document.getElementById('chibiBoss-enabled');
@@ -4357,15 +6326,18 @@ enabledCheckbox.addEventListener('change', () => {
         // включаем всё обратно
         if (actorEl) actorEl.style.display = 'block';
         if (deskEl && settings.deskEnabled) deskEl.style.display = 'block';
+        if (chairEl && settings.chairEnabled) chairEl.style.display = 'block'; 
         if (behavior && !behavior.paused) behavior.resume();
     } else {
         // выключаем: прячем босса, стол, закрываем все окна
         if (actorEl) actorEl.style.display = 'none';
         if (deskEl) deskEl.style.display = 'none';
+        if (chairEl) chairEl.style.display = 'none';
         if (behavior) behavior.pause();
         closeMenu();
         closeTtt();
         closeCheckers();
+        closeChess();
         closeGifts();
         closeLetters();
         closeStats();
@@ -4390,6 +6362,12 @@ enabledCheckbox.addEventListener('change', () => {
         saveSettings(settings);
         setDeskVisible(settings.deskEnabled);
     });
+    
+    chairCheckbox.addEventListener('change', () => {
+        settings.chairEnabled = chairCheckbox.checked;
+        saveSettings(settings);
+        setChairVisible(settings.chairEnabled);
+    });
 
     if (diffEl) {
         diffEl.addEventListener('change', () => {
@@ -4398,13 +6376,11 @@ enabledCheckbox.addEventListener('change', () => {
         });
     }
 
+    // обновляем индикаторы привязанности/стресса, пока меню открыто
     setInterval(() => {
-        const affEl = document.getElementById('chibiBoss-dbg-aff');
-        const stressEl = document.getElementById('chibiBoss-dbg-stress');
-        if (affEl) affEl.textContent = Math.round(settings.affection);
-        if (stressEl) stressEl.textContent = Math.round(settings.stress);
         if (menuOpen) updateIndicators();
     }, 2000);
+
 }
 
 
