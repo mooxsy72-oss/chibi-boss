@@ -2474,14 +2474,18 @@ function startZoomWatcher() {
                 const center = getChairCenter();
                 const zoom = (window.devicePixelRatio || 1) / baseDPR;
                 const scale = 1 / zoom;
-                const half = 62 * scale;
+                // реальные габариты контейнера в кресле (106×130), а не 124×124
+                const halfW = actorEl.offsetWidth  * scale / 2;
+                const halfH = actorEl.offsetHeight * scale / 2;
                 const c = clampToScreen(
-                    Math.round(center.x - half + CHAIR_OFFSET_X),
-                    Math.round(center.y - half + CHAIR_OFFSET_Y)
+                    Math.round(center.x - halfW + CHAIR_OFFSET_X),
+                    Math.round(center.y - halfH + CHAIR_OFFSET_Y),
+                    actorEl.offsetWidth
                 );
                 actorEl.style.left = c.x + 'px';
                 actorEl.style.top  = c.y + 'px';
             } else if (actorEl) {
+
 
                 // обычный случай — просто возвращаем босса в видимую область
                 const bc = clampToScreen(
